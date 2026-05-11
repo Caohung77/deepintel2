@@ -69,20 +69,43 @@ HEADERS = {
 }
 
 
+class FetchResult:
+    __slots__ = ("html", "status", "error_kind", "error_detail", "final_url")
+
+    def __init__(self, html: Optional[str] = None, *, status: Optional[int] = None,
+                 error_kind: Optional[str] = None, error_detail: Optional[str] = None,
+                 final_url: Optional[str] = None):
+        self.html = html
+        self.status = status
+        self.error_kind = error_kind          # 'dns', 'connect', 'timeout', 'http_status', 'non_html', 'empty'
+        self.error_detail = error_detail
+        self.final_url = final_url
+
+
 async def fetch_html(url: str, *, follow_redirects: bool = True, timeout: float = 20.0,
-                     client: Optional[httpx.AsyncClient] = None) -> Optional[str]:
+                     client: Optional[httpx.AsyncClient] = None) -> FetchResult:
     cx = client or httpx.AsyncClient(headers=HEADERS, follow_redirects=follow_redirects, timeout=timeout)
     close = client is None
     try:
         r = await cx.get(url)
-        r.raise_for_status()
-        ctype = r.headers.get("content-type", "")
-        if "html" not in ctype.lower():
-            return None
-        return r.text
+        if r.status_code >= 400:
+            return FetchResult(status=r.status_code, error_kind="http_status",
+                               error_detail=f"HTTP {r.status_code}", final_url=str(r.url))
+        ctype = r.headers.get("content-type", "").lower()
+        if "html" not in ctype:
+            return FetchResult(status=r.status_code, error_kind="non_html",
+                               error_detail=f"content-type: {ctype or 'none'}",
+                               final_url=str(r.url))
+        if not r.text or len(r.text.strip()) < 50:
+            return FetchResult(status=r.status_code, error_kind="empty",
+                               error_detail=f"body {len(r.text)} chars", final_url=str(r.url))
+        return FetchResult(html=r.text, status=r.status_code, final_url=str(r.url))
+    except httpx.ConnectError as e:
+        return FetchResult(error_kind="dns", error_detail=str(e))
+    except httpx.ReadTimeout as e:
+        return FetchResult(error_kind="timeout", error_detail=str(e))
     except httpx.HTTPError as e:
-        print(f"[fast] fetch failed {url}: {e}")
-        return None
+        return FetchResult(error_kind="connect", error_detail=str(e))
     finally:
         if close:
             await cx.aclose()
@@ -121,12 +144,10 @@ async def find_impressum_url(start_url: str, home_html: Optional[str],
     p = urlparse(start_url)
     base = f"{p.scheme}://{p.netloc}"
 
-    # 1. Look for explicit link in home HTML
     if home_html:
         for m in IMPRESSUM_LINK_RX.finditer(home_html):
             return _resolve(start_url, m.group(1))
 
-    # 2. Probe common paths
     for path in IMPRESSUM_PATHS:
         candidate = base + path
         try:
@@ -136,6 +157,16 @@ async def find_impressum_url(start_url: str, home_html: Optional[str],
         except httpx.HTTPError:
             continue
     return None
+
+
+ERROR_MESSAGES = {
+    "dns": "Domain konnte nicht aufgelöst werden. Webseite existiert vermutlich nicht.",
+    "connect": "Server nicht erreichbar (Verbindungsfehler).",
+    "timeout": "Server hat zu lange für eine Antwort gebraucht (Timeout).",
+    "http_status": "Server hat einen Fehlerstatus zurückgegeben.",
+    "non_html": "URL liefert kein HTML aus (vermutlich Datei-Download oder API-Endpunkt).",
+    "empty": "Webseite ist erreichbar, aber liefert keinen Inhalt. Vermutlich Parking-Domain oder defekte Konfiguration.",
+}
 
 
 # ---------- LLM extraction --------------------------------------------------
@@ -380,25 +411,51 @@ async def fast_extract(url: str, *, with_profile: bool = True,
     async with httpx.AsyncClient(
         headers=HEADERS, follow_redirects=True, timeout=20.0,
     ) as cx:
-        home_html = await fetch_html(url, client=cx)
-        if not home_html:
+        home = await fetch_html(url, client=cx)
+        if home.error_kind or not home.html:
+            kind = home.error_kind or "empty"
+            msg = ERROR_MESSAGES.get(kind, "Unbekannter Fehler")
             return {
                 "source_url": url,
-                "error": "Could not fetch HTML",
+                "final_url": home.final_url,
+                "error": msg,
+                "error_kind": kind,
+                "error_detail": home.error_detail,
+                "http_status": home.status,
                 "metrics": {"fetch_ms": round((time.time() - t0) * 1000)},
+            }
+        home_html = home.html
+
+        # Sanity: cleaned text must have at least some substance, otherwise treat as parked page
+        text = html_to_text(home_html)
+        if len(text) < 200:
+            return {
+                "source_url": url,
+                "final_url": home.final_url,
+                "error": (
+                    "Webseite liefert kein verwertbares HTML (z.B. nur Boilerplate, "
+                    "Parking-Seite oder reines JS-Skript ohne Server-Inhalt)."
+                ),
+                "error_kind": "no_content",
+                "error_detail": f"cleaned text {len(text)} chars",
+                "http_status": home.status,
+                "metrics": {
+                    "fetch_ms": round((time.time() - t0) * 1000),
+                    "home_html_bytes": len(home_html),
+                    "home_text_chars": len(text),
+                },
             }
 
         # Resolve Impressum URL + fetch it in parallel with home-page extract
         imp_url_task = asyncio.create_task(find_impressum_url(url, home_html, cx))
 
-        # Start home-page LLM extract immediately
-        text = html_to_text(home_html)
         home_llm_task = asyncio.create_task(llm_extract(text, url))
 
         imp_url = await imp_url_task
         imp_html = None
         if imp_url:
-            imp_html = await fetch_html(imp_url, client=cx)
+            imp = await fetch_html(imp_url, client=cx)
+            imp_html = imp.html if not imp.error_kind else None
 
     fetch_ms = (time.time() - t0) * 1000
 
