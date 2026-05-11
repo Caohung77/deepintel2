@@ -5,5 +5,8 @@ rapidfuzz==3.14.5
 httpx==0.28.1
 openai==2.36.0
 python-dotenv==1.2.2
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
+# Streamlit 1.57 pulls in starlette 1.x; older FastAPI pins starlette<0.42 and
+# breaks Streamlit on import. Use a recent FastAPI release that supports
+# starlette 1.x (>=0.119.0 is the first such tag).
+fastapi>=0.119.0
+uvicorn[standard]>=0.34.0
