@@ -1,0 +1,26 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Runtime data
+cache/
+report.json
+report_*.json
+*.log
+
+# Editors
+.DS_Store
+.idea/
+.vscode/
+
+# Claude / agent local state
+.claude/
