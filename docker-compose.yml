@@ -20,25 +20,26 @@ services:
     volumes:
       - deepintel_data:/data
     networks:
-      - web
+      - traefik-public
       - default
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=web"
+      - "traefik.docker.network=traefik-public"
       # HTTPS router
       - "traefik.http.routers.deepintel.rule=Host(`deepintel.boniforce.de`)"
       - "traefik.http.routers.deepintel.entrypoints=websecure"
       - "traefik.http.routers.deepintel.tls=true"
       - "traefik.http.routers.deepintel.tls.certresolver=letsencrypt"
       - "traefik.http.services.deepintel.loadbalancer.server.port=8501"
-      # Streamlit needs websockets for live updates — explicit headers
+      # HTTP → HTTPS redirect (same pattern as other services on this host)
+      - "traefik.http.routers.deepintel-http.rule=Host(`deepintel.boniforce.de`)"
+      - "traefik.http.routers.deepintel-http.entrypoints=web"
+      - "traefik.http.routers.deepintel-http.middlewares=deepintel-redirect"
+      - "traefik.http.middlewares.deepintel-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.deepintel-redirect.redirectscheme.permanent=true"
+      # Force X-Forwarded-Proto so Streamlit knows it is behind HTTPS
       - "traefik.http.middlewares.deepintel-headers.headers.customRequestHeaders.X-Forwarded-Proto=https"
       - "traefik.http.routers.deepintel.middlewares=deepintel-headers"
-      # Optional HTTP → HTTPS redirect (uncomment if not handled globally)
-      # - "traefik.http.routers.deepintel-http.rule=Host(`deepintel.boniforce.de`)"
-      # - "traefik.http.routers.deepintel-http.entrypoints=web"
-      # - "traefik.http.routers.deepintel-http.middlewares=https-redirect"
-      # - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:8501/_stcore/health || exit 1"]
       interval: 30s
@@ -55,6 +56,5 @@ volumes:
   deepintel_data:
 
 networks:
-  web:
+  traefik-public:
     external: true
-    # Change if your Traefik network has a different name.
