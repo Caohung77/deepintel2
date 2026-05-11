@@ -225,21 +225,10 @@ if report and ("extracted" in report or report.get("error_kind")):
     if report.get("error"):
         with st.container(border=True):
             st.markdown("### 😕 Keine Analyse möglich")
-            st.markdown(f"**{report['error']}**")
+            st.markdown(report["error"])
             st.markdown(
                 f"Geprüfte URL: [{report.get('source_url', '?')}]({report.get('source_url', '#')})"
             )
-            st.caption(
-                "Bitte URL prüfen. Wenn die Webseite im Browser funktioniert und Inhalte "
-                "anzeigt, kann es helfen, ein paar Minuten zu warten und es erneut zu versuchen."
-            )
-            with st.expander("Technische Details"):
-                _kv("Fehler-Typ", report.get("error_kind"))
-                _kv("HTTP Status", report.get("http_status"))
-                _kv("Final URL nach Redirect", report.get("final_url"))
-                _kv("Detail", report.get("error_detail"))
-                if metrics.get("fetch_ms"):
-                    _kv("Fetch-Zeit", f"{metrics['fetch_ms']} ms")
     else:
         col1, col2 = st.columns([3, 1])
         with col1:
