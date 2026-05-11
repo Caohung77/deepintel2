@@ -23,6 +23,7 @@ RUN python -c "import crawl4ai" && crawl4ai-setup || true
 COPY app.py worker.py pipeline.py fast_extractor.py company_extractor.py /app/
 COPY enrichment /app/enrichment
 COPY synthesis  /app/synthesis
+COPY api        /app/api
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
@@ -30,6 +31,6 @@ RUN chmod +x /app/entrypoint.sh
 RUN mkdir -p /data/jobs /data/cache && \
     ln -sf /data/cache /app/cache
 
-EXPOSE 8501
+EXPOSE 8501 8000
 
 ENTRYPOINT ["/app/entrypoint.sh"]

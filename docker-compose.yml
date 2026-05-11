@@ -25,21 +25,31 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-public"
-      # HTTPS router
+      # Two backend services on this single container
+      - "traefik.http.services.deepintel-ui.loadbalancer.server.port=8501"
+      - "traefik.http.services.deepintel-api.loadbalancer.server.port=8000"
+      # ── HTTPS router: API (/api*) — higher priority than UI
+      - "traefik.http.routers.deepintel-api.rule=Host(`deepintel.boniforce.de`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.deepintel-api.entrypoints=websecure"
+      - "traefik.http.routers.deepintel-api.tls=true"
+      - "traefik.http.routers.deepintel-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.deepintel-api.service=deepintel-api"
+      - "traefik.http.routers.deepintel-api.priority=20"
+      # ── HTTPS router: UI (everything else)
       - "traefik.http.routers.deepintel.rule=Host(`deepintel.boniforce.de`)"
       - "traefik.http.routers.deepintel.entrypoints=websecure"
       - "traefik.http.routers.deepintel.tls=true"
       - "traefik.http.routers.deepintel.tls.certresolver=letsencrypt"
-      - "traefik.http.services.deepintel.loadbalancer.server.port=8501"
-      # HTTP → HTTPS redirect (same pattern as other services on this host)
+      - "traefik.http.routers.deepintel.service=deepintel-ui"
+      - "traefik.http.routers.deepintel.priority=10"
+      - "traefik.http.middlewares.deepintel-headers.headers.customRequestHeaders.X-Forwarded-Proto=https"
+      - "traefik.http.routers.deepintel.middlewares=deepintel-headers"
+      # ── HTTP → HTTPS redirect (both routers)
       - "traefik.http.routers.deepintel-http.rule=Host(`deepintel.boniforce.de`)"
       - "traefik.http.routers.deepintel-http.entrypoints=web"
       - "traefik.http.routers.deepintel-http.middlewares=deepintel-redirect"
       - "traefik.http.middlewares.deepintel-redirect.redirectscheme.scheme=https"
       - "traefik.http.middlewares.deepintel-redirect.redirectscheme.permanent=true"
-      # Force X-Forwarded-Proto so Streamlit knows it is behind HTTPS
-      - "traefik.http.middlewares.deepintel-headers.headers.customRequestHeaders.X-Forwarded-Proto=https"
-      - "traefik.http.routers.deepintel.middlewares=deepintel-headers"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5).read()"]
       interval: 30s
