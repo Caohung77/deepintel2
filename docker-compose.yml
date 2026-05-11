@@ -1,0 +1,60 @@
+# Production compose for deepintel2.
+#
+# Assumes:
+#   - Traefik already runs on this host with the external network name below.
+#   - Traefik has a `websecure` entrypoint with a Let's Encrypt resolver.
+#   - DNS for deepintel.boniforce.de points to the host IP.
+#
+# Adjust TRAEFIK_NETWORK / CERTRESOLVER below to match your stack.
+
+services:
+  deepintel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepintel2:0.1.0
+    container_name: deepintel2
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - deepintel_data:/data
+    networks:
+      - web
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      # HTTPS router
+      - "traefik.http.routers.deepintel.rule=Host(`deepintel.boniforce.de`)"
+      - "traefik.http.routers.deepintel.entrypoints=websecure"
+      - "traefik.http.routers.deepintel.tls=true"
+      - "traefik.http.routers.deepintel.tls.certresolver=letsencrypt"
+      - "traefik.http.services.deepintel.loadbalancer.server.port=8501"
+      # Streamlit needs websockets for live updates — explicit headers
+      - "traefik.http.middlewares.deepintel-headers.headers.customRequestHeaders.X-Forwarded-Proto=https"
+      - "traefik.http.routers.deepintel.middlewares=deepintel-headers"
+      # Optional HTTP → HTTPS redirect (uncomment if not handled globally)
+      # - "traefik.http.routers.deepintel-http.rule=Host(`deepintel.boniforce.de`)"
+      # - "traefik.http.routers.deepintel-http.entrypoints=web"
+      # - "traefik.http.routers.deepintel-http.middlewares=https-redirect"
+      # - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8501/_stcore/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  deepintel_data:
+
+networks:
+  web:
+    external: true
+    # Change if your Traefik network has a different name.

@@ -1,0 +1,7 @@
+crawl4ai==0.8.6
+pydantic==2.13.4
+streamlit==1.57.0
+rapidfuzz==3.14.5
+httpx==0.28.1
+openai==2.36.0
+python-dotenv==1.2.2
