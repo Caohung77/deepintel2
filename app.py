@@ -223,28 +223,23 @@ if report and ("extracted" in report or report.get("error_kind")):
     metrics = report.get("metrics") or {}
 
     if report.get("error"):
-        kind = report.get("error_kind", "unknown")
-        st.error(f"### ❌ Keine Daten verfügbar\n\n{report['error']}")
         with st.container(border=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                _kv("URL", report.get("source_url"))
-                _kv("Final URL nach Redirect", report.get("final_url"))
+            st.markdown("### 😕 Keine Analyse möglich")
+            st.markdown(f"**{report['error']}**")
+            st.markdown(
+                f"Geprüfte URL: [{report.get('source_url', '?')}]({report.get('source_url', '#')})"
+            )
+            st.caption(
+                "Bitte URL prüfen. Wenn die Webseite im Browser funktioniert und Inhalte "
+                "anzeigt, kann es helfen, ein paar Minuten zu warten und es erneut zu versuchen."
+            )
+            with st.expander("Technische Details"):
+                _kv("Fehler-Typ", report.get("error_kind"))
                 _kv("HTTP Status", report.get("http_status"))
-            with c2:
-                _kv("Fehler-Typ", kind)
+                _kv("Final URL nach Redirect", report.get("final_url"))
                 _kv("Detail", report.get("error_detail"))
                 if metrics.get("fetch_ms"):
                     _kv("Fetch-Zeit", f"{metrics['fetch_ms']} ms")
-        st.info(
-            "Mögliche Ursachen je nach Fehler-Typ:\n"
-            "- **dns**: Domain existiert nicht (Tippfehler? Domain abgelaufen?).\n"
-            "- **connect / timeout**: Server offline oder Firewall blockt.\n"
-            "- **http_status**: Server antwortet mit Fehler (z.B. 403, 500).\n"
-            "- **empty / no_content**: Parking-Domain, leere Konfiguration, oder reine JS-SPA "
-            "ohne Server-Side-Rendering.\n"
-            "- **non_html**: URL zeigt direkt auf eine Datei oder API."
-        )
     else:
         col1, col2 = st.columns([3, 1])
         with col1:

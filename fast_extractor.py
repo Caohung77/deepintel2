@@ -159,14 +159,10 @@ async def find_impressum_url(start_url: str, home_html: Optional[str],
     return None
 
 
-ERROR_MESSAGES = {
-    "dns": "Domain konnte nicht aufgelöst werden. Webseite existiert vermutlich nicht.",
-    "connect": "Server nicht erreichbar (Verbindungsfehler).",
-    "timeout": "Server hat zu lange für eine Antwort gebraucht (Timeout).",
-    "http_status": "Server hat einen Fehlerstatus zurückgegeben.",
-    "non_html": "URL liefert kein HTML aus (vermutlich Datei-Download oder API-Endpunkt).",
-    "empty": "Webseite ist erreichbar, aber liefert keinen Inhalt. Vermutlich Parking-Domain oder defekte Konfiguration.",
-}
+USER_FRIENDLY_MESSAGE = (
+    "Leider ist keine Analyse möglich, da die Firmenwebseite nicht erreichbar ist "
+    "oder nicht genügend relevante Informationen liefert."
+)
 
 
 # ---------- LLM extraction --------------------------------------------------
@@ -413,13 +409,11 @@ async def fast_extract(url: str, *, with_profile: bool = True,
     ) as cx:
         home = await fetch_html(url, client=cx)
         if home.error_kind or not home.html:
-            kind = home.error_kind or "empty"
-            msg = ERROR_MESSAGES.get(kind, "Unbekannter Fehler")
             return {
                 "source_url": url,
                 "final_url": home.final_url,
-                "error": msg,
-                "error_kind": kind,
+                "error": USER_FRIENDLY_MESSAGE,
+                "error_kind": home.error_kind or "empty",
                 "error_detail": home.error_detail,
                 "http_status": home.status,
                 "metrics": {"fetch_ms": round((time.time() - t0) * 1000)},
@@ -432,10 +426,7 @@ async def fast_extract(url: str, *, with_profile: bool = True,
             return {
                 "source_url": url,
                 "final_url": home.final_url,
-                "error": (
-                    "Webseite liefert kein verwertbares HTML (z.B. nur Boilerplate, "
-                    "Parking-Seite oder reines JS-Skript ohne Server-Inhalt)."
-                ),
+                "error": USER_FRIENDLY_MESSAGE,
                 "error_kind": "no_content",
                 "error_detail": f"cleaned text {len(text)} chars",
                 "http_status": home.status,
