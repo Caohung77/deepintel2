@@ -115,7 +115,7 @@ Successful analysis. Fields are stable; consumers should ignore unknown keys.
       "insolvency": {                                // German insolvency check
         "insolvenzverfahren": true,                  // proceeding currently active (vorläufig/eröffnet)
         "insolvenz": false,                          // already insolvent / concluded / liquidated
-        "answer": "",                                // (reserved; not used for the booleans)
+        "answer": "Tavily's free-text summary",      // returned, but NOT used for the booleans (may contradict them)
         "evidence": [ { "title":"...", "url":"..." } ]// supporting sources (court Bekanntmachung, registers)
       }
     },
@@ -165,7 +165,7 @@ Returned inside the standard `POST /api/analyze` response (no separate endpoint)
 | --- | --- | --- |
 | `insolvenzverfahren` | bool | An insolvency **proceeding is currently active** — preliminary or opened (`vorläufiger Insolvenzverwalter`, `Insolvenzverfahren eröffnet`, `Sicherungsmaßnahmen`, court `Az. n IN n/yy`). |
 | `insolvenz` | bool | Company is **already insolvent / proceeding concluded / liquidated** (`ist insolvent`, `zahlungsunfähig`, `liquidiert`, `aufgelöst`). |
-| `answer` | string | Reserved. Not used to derive the booleans (kept empty in payloads). |
+| `answer` | string | Tavily's free-text summary of the insolvency question. Returned for context but **not** used to derive the booleans — it can contradict them (it echoes the dominant search narrative), so rely on the booleans + `evidence`, not this. |
 | `evidence` | array | Up to 3 supporting sources `{title, url}` (court Bekanntmachungen, registers, news) for human verification. |
 
 Typical states:
