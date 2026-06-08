@@ -111,7 +111,13 @@ Successful analysis. Fields are stable; consumers should ignore unknown keys.
     "tavily": {
       "competitor_snippets": [ { "title":"...", "url":"...", "snippet":"..." } ],
       "news": [ { "title":"...", "url":"...", "published_date":"2026-04-..." } ],
-      "risk_events": []
+      "risk_events": [],
+      "insolvency": {                                // German insolvency check
+        "insolvenzverfahren": true,                  // proceeding currently active (vorläufig/eröffnet)
+        "insolvenz": false,                          // already insolvent / concluded / liquidated
+        "answer": "",                                // (reserved; not used for the booleans)
+        "evidence": [ { "title":"...", "url":"..." } ]// supporting sources (court Bekanntmachung, registers)
+      }
     },
     "sanctions": []                                  // hits if name on OpenSanctions
   },
@@ -150,6 +156,26 @@ Successful analysis. Fields are stable; consumers should ignore unknown keys.
   }
 }
 ```
+
+### Insolvency check (`enrichment.tavily.insolvency`)
+
+Returned inside the standard `POST /api/analyze` response (no separate endpoint). Requires `options.with_enrichment = true` (the default); with enrichment disabled the booleans stay `false` and `evidence` is empty.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `insolvenzverfahren` | bool | An insolvency **proceeding is currently active** — preliminary or opened (`vorläufiger Insolvenzverwalter`, `Insolvenzverfahren eröffnet`, `Sicherungsmaßnahmen`, court `Az. n IN n/yy`). |
+| `insolvenz` | bool | Company is **already insolvent / proceeding concluded / liquidated** (`ist insolvent`, `zahlungsunfähig`, `liquidiert`, `aufgelöst`). |
+| `answer` | string | Reserved. Not used to derive the booleans (kept empty in payloads). |
+| `evidence` | array | Up to 3 supporting sources `{title, url}` (court Bekanntmachungen, registers, news) for human verification. |
+
+Typical states:
+- Healthy: `{"insolvenzverfahren": false, "insolvenz": false}`
+- In proceeding: `{"insolvenzverfahren": true, "insolvenz": false}`
+- Already insolvent / wound up: `{"insolvenzverfahren": true, "insolvenz": true}`
+
+**How it works:** a Tavily search (`search_depth=advanced`, `time_range=year`) asks whether the company is insolvent; signals are attributed to the queried company by court-record proximity, so other firms co-listed on multi-company insolvency pages do not produce false positives.
+
+**Caveat:** this is a screening signal, not a legal record. The official `insolvenzbekanntmachungen.de` portal is not crawlable, so detection relies on third-party republishers — recall is strong but not guaranteed, and filings older than ~12 months may be missed. Always check `evidence[]` before acting. For authoritative status use a credit-register source.
 
 ### 422 Unprocessable Entity — unreachable or empty site
 
