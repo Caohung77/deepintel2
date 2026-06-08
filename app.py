@@ -214,6 +214,36 @@ def _kv(label: str, value: Any) -> None:
     st.markdown(f"**{label}:** {value}")
 
 
+def _render_insolvency(tavily: dict) -> None:
+    """Prominent insolvency status banner from enrichment.tavily.insolvency."""
+    ins = (tavily or {}).get("insolvency") or {}
+    verfahren = ins.get("insolvenzverfahren")
+    insolvent = ins.get("insolvenz")
+    evidence = ins.get("evidence") or []
+
+    # Loud full-width banner — this is high-stakes risk info.
+    if insolvent:
+        st.error("## 🔴 INSOLVENT — Unternehmen insolvent / Verfahren abgeschlossen")
+    elif verfahren:
+        st.error("## 🔴 INSOLVENZVERFAHREN LÄUFT — vorläufig/eröffnet")
+    else:
+        st.success("## 🟢 Keine Insolvenzhinweise gefunden")
+
+    with st.container(border=True):
+        cols = st.columns(2)
+        with cols[0]:
+            st.metric("Insolvenzverfahren", "🔴 Ja (laufend)" if verfahren else "🟢 Nein")
+        with cols[1]:
+            st.metric("Insolvent", "🔴 Ja" if insolvent else "🟢 Nein")
+
+        if evidence:
+            with st.expander(f"⚖️ Belege ({len(evidence)})"):
+                for ev in evidence:
+                    title = ev.get("title") or ev.get("url") or "Quelle"
+                    url = ev.get("url") or "#"
+                    st.markdown(f"- [{title}]({url})")
+
+
 # ---- render ---------------------------------------------------------------
 report = st.session_state.report
 
@@ -238,6 +268,11 @@ if report and ("extracted" in report or report.get("error_kind")):
         with col2:
             if metrics.get("total_ms"):
                 st.metric("Time", f"{metrics['total_ms'] / 1000:.1f}s")
+
+        # ----- Insolvenz-Check (prominent, top of page) -----
+        fast_tavily = (report.get("enrichment") or {}).get("tavily") or {}
+        if fast_tavily.get("insolvency"):
+            _render_insolvency(fast_tavily)
 
         # ----- B2B Analyse-Profil (top of page) -----
         profile = report.get("profile") or {}
@@ -542,6 +577,8 @@ elif report:
 
         # Tavily news + competitors
         tavily = enrichment.get("tavily") or {}
+        if tavily.get("insolvency"):
+            _render_insolvency(tavily)
         st.subheader("Competitor search snippets")
         cs = tavily.get("competitor_snippets") or []
         if cs:

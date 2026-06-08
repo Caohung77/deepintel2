@@ -77,6 +77,16 @@ def build_data_block(report: Dict[str, Any]) -> str:
             {"title": r.get("title"), "snippet": r.get("snippet"), "tag": r.get("risk_tag")}
             for r in (tavily.get("risk_events") or [])[:6]
         ],
+        "insolvency": {
+            "insolvenzverfahren": (tavily.get("insolvency") or {}).get("insolvenzverfahren", False),
+            "insolvenz": (tavily.get("insolvency") or {}).get("insolvenz", False),
+            # Tavily's free-text "answer" is intentionally omitted — it echoes the
+            # dominant index narrative and can contradict the attributed booleans.
+            "evidence": [
+                {"title": e.get("title"), "url": e.get("url")}
+                for e in ((tavily.get("insolvency") or {}).get("evidence") or [])[:3]
+            ],
+        },
         "sanctions_hits": sanctions,
     }
     return json.dumps(payload, indent=2, ensure_ascii=False)

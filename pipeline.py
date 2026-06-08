@@ -82,7 +82,12 @@ async def run_full_pipeline(
 
     enrichment: Dict[str, Any] = {
         "wikidata": [],
-        "tavily": {"competitor_snippets": [], "news": [], "risk_events": []},
+        "tavily": {
+            "competitor_snippets": [],
+            "news": [],
+            "risk_events": [],
+            "insolvency": {"insolvenzverfahren": False, "insolvenz": False, "answer": "", "evidence": []},
+        },
         "sanctions": [],
     }
 

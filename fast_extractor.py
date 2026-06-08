@@ -111,6 +111,37 @@ async def fetch_html(url: str, *, follow_redirects: bool = True, timeout: float 
             await cx.aclose()
 
 
+# httpx errors that usually mean a WAF/bot-block (e.g. Cloudflare 403) rather
+# than a genuinely dead site — worth retrying with a real browser.
+_WAF_BLOCK_KINDS = {"http_status", "connect", "timeout", "non_html"}
+
+
+async def browser_fetch(url: str) -> Optional[str]:
+    """Fallback fetch via a real Chromium (crawl4ai). Handles two cases plain
+    httpx cannot: (1) WAF/Cloudflare blocks (real TLS fingerprint + JS challenge)
+    and (2) JS-rendered SPAs that ship an empty HTML shell (waits for network
+    idle + lets late content render). Returns HTML or None."""
+    try:
+        from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+    except ImportError as e:
+        print(f"[fast] browser fallback unavailable: {e}")
+        return None
+    try:
+        cfg = CrawlerRunConfig(
+            wait_until="networkidle",
+            page_timeout=20000,
+            delay_before_return_html=2.5,
+            scan_full_page=True,
+        )
+        async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as c:
+            r = await c.arun(url=url, config=cfg)
+            if getattr(r, "success", False) and r.html and len(r.html.strip()) > 200:
+                return r.html
+    except Exception as e:  # noqa: BLE001 — fallback must never crash the request
+        print(f"[fast] browser fallback failed: {e}")
+    return None
+
+
 IMPRESSUM_PATHS = [
     "/impressum", "/impressum/",
     "/imprint", "/imprint/",
@@ -408,20 +439,36 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         headers=HEADERS, follow_redirects=True, timeout=20.0,
     ) as cx:
         home = await fetch_html(url, client=cx)
-        if home.error_kind or not home.html:
-            return {
-                "source_url": url,
-                "final_url": home.final_url,
-                "error": USER_FRIENDLY_MESSAGE,
-                "error_kind": home.error_kind or "empty",
-                "error_detail": home.error_detail,
-                "http_status": home.status,
-                "metrics": {"fetch_ms": round((time.time() - t0) * 1000)},
-            }
         home_html = home.html
+        used_browser = False
+        # WAF/Cloudflare block (e.g. 403 from a datacenter IP) → retry via real browser.
+        if (home.error_kind in _WAF_BLOCK_KINDS) or not home_html:
+            print(f"[fast] httpx fetch failed ({home.error_kind}); trying browser fallback")
+            fallback_html = await browser_fetch(url)
+            used_browser = True
+            if fallback_html:
+                home_html = fallback_html
+            else:
+                return {
+                    "source_url": url,
+                    "final_url": home.final_url,
+                    "error": USER_FRIENDLY_MESSAGE,
+                    "error_kind": home.error_kind or "empty",
+                    "error_detail": home.error_detail,
+                    "http_status": home.status,
+                    "metrics": {"fetch_ms": round((time.time() - t0) * 1000)},
+                }
 
-        # Sanity: cleaned text must have at least some substance, otherwise treat as parked page
+        # Sanity: cleaned text must have substance. A 200 with near-empty text is
+        # usually a JS-rendered SPA shipping an empty shell → render with browser.
         text = html_to_text(home_html)
+        if len(text) < 200 and not used_browser:
+            print(f"[fast] thin text ({len(text)} chars); trying browser fallback (likely JS SPA)")
+            fallback_html = await browser_fetch(url)
+            if fallback_html:
+                home_html = fallback_html
+                text = html_to_text(home_html)
+
         if len(text) < 200:
             return {
                 "source_url": url,
@@ -473,7 +520,9 @@ async def fast_extract(url: str, *, with_profile: bool = True,
             "url": imp_url,
             "data": impressum_data,
         } if imp_url else None,
-        "enrichment": {"tavily": {"competitor_snippets": [], "news": [], "risk_events": []},
+        "enrichment": {"tavily": {"competitor_snippets": [], "news": [], "risk_events": [],
+                                  "insolvency": {"insolvenzverfahren": False, "insolvenz": False,
+                                                 "answer": "", "evidence": []}},
                        "sanctions": [], "wikidata": []},
         "profile": None,
         "metrics": {

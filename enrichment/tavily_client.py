@@ -1,10 +1,11 @@
 """
 Tavily search client for B2B enrichment.
 
-Three queries per company:
+Four queries per company:
   1. Competitors search
   2. Risk-event search (insolvency, lawsuits, scandals, recalls, fines)
   3. Recent news (last 90 days)
+  4. Insolvency question (uses Tavily include_answer to ask + answer directly)
 
 Returns normalised dicts ready to feed into the synthesis prompt.
 
@@ -82,8 +83,11 @@ async def _tavily_search(
     days: Optional[int] = None,
     max_results: int = 8,
     exclude_domains: Optional[List[str]] = None,
+    include_answer: bool = False,
+    search_depth: str = "basic",
+    time_range: Optional[str] = None,
 ) -> dict:
-    cache_key = f"{topic}_{query}_{days}"
+    cache_key = f"{topic}_{query}_{days}_{int(include_answer)}_{search_depth}_{time_range}"
     cached = _load_cache(cache_key)
     if cached:
         return cached
@@ -92,8 +96,12 @@ async def _tavily_search(
         "query": query,
         "topic": topic,
         "max_results": max_results,
-        "search_depth": "basic",
+        "search_depth": search_depth,
     }
+    if include_answer:
+        payload["include_answer"] = True
+    if time_range:
+        payload["time_range"] = time_range
     if days and topic == "news":
         payload["days"] = days
     if exclude_domains:
@@ -133,15 +141,157 @@ def _tag_risk(item: dict) -> Optional[str]:
     return None
 
 
+# --- Insolvency signal patterns (lead structural, gate bare "insolvent" hardest) ---
+
+# Court file number, e.g. "2 IN 277/26" — highest-precision proceeding marker.
+_COURT_AZ_RX = re.compile(r"\b\d+\s*IN\s*\d+\s*/\s*\d+\b", re.I)
+
+# Proceeding IN PROCESS (opened / preliminary / applied for, not yet concluded).
+_VERFAHREN_RX = re.compile(
+    r"("
+    r"vorläufige[rn]?\s+insolvenzverwalter|insolvenzverwalter\s+(wurde\s+)?bestellt|"
+    r"sicherungsmaßnahmen|"
+    r"insolvenzverfahren\s+(wurde\s+)?eröffnet|eröffnung\s+des\s+insolvenzverfahrens|"
+    r"vorläufige[s]?\s+insolvenzverfahren|insolvenzantrag|antrag\s+auf\s+insolvenz|"
+    r"schutzschirmverfahren|regelinsolvenz|eigenverwaltung|insolvenz\s+angemeldet|"
+    r"files?\s+for\s+insolvency|filed\s+for\s+(insolvency|bankruptcy)|"
+    r"insolvency\s+proceedings\s+(opened|filed)|chapter\s*11"
+    r")",
+    re.I,
+)
+
+# Already INSOLVENT / concluded / liquidated / dissolved by insolvency.
+_INSOLVENT_RX = re.compile(
+    r"("
+    r"ist\s+insolvent|ist\s+zahlungsunfähig|zahlungsunfähig|"
+    r"insolvenzverfahren\s+abgeschlossen|"
+    r"durch\s+eröffnung\s+des\s+insolvenzverfahrens.{0,60}?aufgelöst|"
+    r"aufgelöst\s+wegen\s+insolvenz|liquidiert|abgewickelt|"
+    r"bankrupt|liquidated|wound\s+up"
+    r")",
+    re.I,
+)
+
+# Explicit negation — "not insolvent", "no insolvency procedure", "keine Insolvenz".
+# Suppresses WEAK ties only; strong court signals override it.
+_NEG_RX = re.compile(
+    r"\b(no|not|kein|keine|nicht)\b[^.;!?]{0,40}?(insolven\w+|bankrupt\w*|zahlungsunfähig)",
+    re.I,
+)
+
+_LEGAL_SUFFIX = {
+    "gmbh", "mbh", "co", "kg", "ag", "se", "ug", "kgaa", "ohg", "gbr",
+    "ek", "ev", "und", "the", "haftungsbeschränkt", "cnc",
+}
+_PROX_WINDOW = 120  # chars between a company-name token and a signal to attribute it
+
+
+def _core_tokens(name: str) -> List[str]:
+    toks = re.split(r"[^a-z0-9]+", (name or "").lower())
+    return [t for t in toks if len(t) >= 3 and t not in _LEGAL_SUFFIX]
+
+
+def _token_positions(text_low: str, tokens: List[str]) -> List[int]:
+    pos: List[int] = []
+    for t in tokens:
+        start = 0
+        while (i := text_low.find(t, start)) >= 0:
+            pos.append(i)
+            start = i + len(t)
+    return pos
+
+
+_PROX_AFTER = 40  # name may trail the signal only by a tight margin
+
+
+def _attributable(rx: re.Pattern, text: str, name_pos: List[int]) -> bool:
+    """True if a pattern match plausibly attaches to THIS company, not a
+    co-listed one. German insolvency records put the company name *before* its
+    signal ("X GmbH, <addr>. Durch Beschluss ... (Az) wurde ... bestellt"), so
+    we attribute when a name token precedes the signal within _PROX_WINDOW, or
+    trails it within a tight _PROX_AFTER. A co-listed name sitting after another
+    firm's Aktenzeichen is therefore not attributed."""
+    for m in rx.finditer(text):
+        for p in name_pos:
+            if 0 <= (m.start() - p) <= _PROX_WINDOW:   # name before signal
+                return True
+            if 0 <= (p - m.end()) <= _PROX_AFTER:      # name shortly after signal
+                return True
+    return False
+
+
+def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> dict:
+    """Derive two booleans from company-attributable signals in the results.
+
+    insolvenzverfahren -> proceeding currently in process
+    insolvenz          -> company already insolvent / concluded / liquidated
+
+    Tavily's synthesised ``answer`` is NOT trusted for the booleans — it tends to
+    echo whichever narrative dominates the index (e.g. an old acquisition) and
+    produced a false "not insolvent". Instead each result item is checked for an
+    insolvency signal *within a character window of the company name*, so phrases
+    belonging to other companies on the same page do not bleed in. Strong court
+    signals (Aktenzeichen, "vorläufiger Insolvenzverwalter", "eröffnet") are not
+    suppressed by negation; only weak/ambiguous matches are.
+    """
+    answer = (answer or "").strip()
+    core = _core_tokens(company_name)
+    verfahren = False
+    insolvent = False
+    hits: List[dict] = []
+
+    for it in items:
+        text = f"{it.get('title','')} {it.get('snippet','')}"
+        low = text.lower()
+        name_pos = _token_positions(low, core)
+        # Require the company to be clearly mentioned (>=2 distinct core tokens,
+        # or the single token if the name has only one).
+        distinct = sum(1 for t in core if t in low)
+        if distinct < min(2, len(core)) or not name_pos:
+            continue
+
+        az = _attributable(_COURT_AZ_RX, text, name_pos)
+        v = _attributable(_VERFAHREN_RX, text, name_pos)
+        i = _attributable(_INSOLVENT_RX, text, name_pos)
+
+        # Negation suppresses only when there is no strong court-tied signal.
+        if _NEG_RX.search(text) and not (az or v or i):
+            continue
+
+        if v or az:
+            verfahren = True
+        if i:
+            insolvent = True
+        if v or az or i:
+            hits.append(it)
+
+    return {
+        "insolvenzverfahren": verfahren,
+        "insolvenz": insolvent,
+        "answer": answer,
+        "evidence": [
+            {"title": it.get("title"), "url": it.get("url"), "snippet": it.get("snippet")}
+            for it in (hits or items)[:5]
+        ],
+    }
+
+
 async def tavily_enrich(company_name: str, own_domain: Optional[str] = None) -> dict:
     """Run 3 Tavily searches and normalise into competitors / news / risk_events."""
     api_key = os.getenv("TAVILY_API_KEY")
+    _empty_insolvency = {
+        "insolvenzverfahren": False,
+        "insolvenz": False,
+        "answer": "",
+        "evidence": [],
+    }
+
     if not api_key:
         print("[tavily] TAVILY_API_KEY not set — skipping enrichment")
-        return {"competitors": [], "news": [], "risk_events": []}
+        return {"competitor_snippets": [], "news": [], "risk_events": [], "insolvency": _empty_insolvency}
 
     if not company_name:
-        return {"competitors": [], "news": [], "risk_events": []}
+        return {"competitor_snippets": [], "news": [], "risk_events": [], "insolvency": _empty_insolvency}
 
     exclude = []
     if own_domain:
@@ -152,16 +302,26 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None) -> 
         comp_q = f'"{company_name}" competitors OR Wettbewerber OR alternatives'
         risk_q = f'"{company_name}" ({RISK_KEYWORDS})'
         news_q = f'"{company_name}"'
+        inso_q = (
+            f'Ist die Firma "{company_name}" insolvent? '
+            f'Gibt es ein Insolvenzverfahren gegen "{company_name}"?'
+        )
 
-        comp_raw, risk_raw, news_raw = await asyncio.gather(
+        comp_raw, risk_raw, news_raw, inso_raw = await asyncio.gather(
             _tavily_search(cx, comp_q, api_key, exclude_domains=exclude, max_results=8),
             _tavily_search(cx, risk_q, api_key, exclude_domains=exclude, max_results=10),
             _tavily_search(cx, news_q, api_key, topic="news", days=90, max_results=10),
+            _tavily_search(
+                cx, inso_q, api_key, max_results=10,
+                include_answer=True, search_depth="advanced", time_range="year",
+            ),
         )
 
     comp_items = _norm_results(comp_raw)
     risk_items = _norm_results(risk_raw)
     news_items = _norm_results(news_raw)
+    inso_items = _norm_results(inso_raw)
+    insolvency = _classify_insolvency(company_name, inso_raw.get("answer", "") or "", inso_items)
 
     risk_events = []
     for it in risk_items:
@@ -177,6 +337,7 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None) -> 
         "competitor_snippets": comp_items,
         "news": news_items,
         "risk_events": risk_events,
+        "insolvency": insolvency,
     }
 
 
