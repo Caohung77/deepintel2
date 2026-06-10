@@ -260,6 +260,9 @@ SYSTEM_PROMPT = (
     "4. 'what_they_do' soll dicht und sachlich sein, 4-7 Sätze.\n"
     "5. 'elevator_pitch' EIN Satz ohne Werbesprache.\n"
     "6. Sprache der Felder: nutze die Sprache der Webseite (deutsch wenn deutsch).\n"
+    "7. 'core_products_services': liste ALLE Produkte/Leistungen in der Reihenfolge "
+    "ihres Auftretens auf der Seite. Sortiere NICHT um und lass nichts weg. Bei "
+    "wiederholter Anfrage muss dieselbe Liste in derselben Reihenfolge entstehen.\n"
     "Gib NUR gültiges JSON zurück, ohne Markdown-Code-Block, ohne Erklärung."
 )
 
@@ -291,7 +294,8 @@ async def llm_extract(page_text: str, source_url: str) -> Optional[dict]:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        temperature=0.1,
+        temperature=0.0,
+        top_p=0.0,
         response_format={"type": "json_object"},
         max_tokens=8000,
         extra_body={"reasoning_effort": "none"},
@@ -358,6 +362,7 @@ async def llm_extract_impressum(impressum_text: str, source_url: str) -> Optiona
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,
+        top_p=0.0,
         response_format={"type": "json_object"},
         max_tokens=2000,
         extra_body={"reasoning_effort": "none"},

@@ -45,6 +45,7 @@ async def _call_gemini(system: str, user: str, *, model: str = "gemini-2.5-flash
             {"role": "user", "content": user},
         ],
         temperature=temperature,
+        top_p=0.0,
         max_tokens=max_tokens,
         extra_body={"reasoning_effort": "none"},
     )
@@ -52,7 +53,7 @@ async def _call_gemini(system: str, user: str, *, model: str = "gemini-2.5-flash
 
 
 async def _call_openai(system: str, user: str, *, model: Optional[str] = None,
-                       temperature: float = 0.2, max_tokens: int = 1200) -> str:
+                       temperature: float = 0.0, max_tokens: int = 1200) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
@@ -67,6 +68,8 @@ async def _call_openai(system: str, user: str, *, model: Optional[str] = None,
             {"role": "user", "content": user},
         ],
         temperature=temperature,
+        top_p=1.0,
+        seed=int(os.getenv("LLM_SEED", "7")),
         max_tokens=max_tokens,
     )
     return (resp.choices[0].message.content or "").strip()
@@ -111,7 +114,7 @@ async def synthesize_outlook(company_name: str, company_data: Dict[str, Any],
                               branch_score: Dict[str, Any],
                               branch_news: Optional[Dict[str, Any]]) -> str:
     system, user = branch_outlook_prompt(company_name, company_data, branch_score, branch_news)
-    text = await _call_openai(system, user, temperature=0.2)
+    text = await _call_openai(system, user, temperature=0.0)
     # If model produced wrong shape, retry once with strict reminder
     if not _has_sections(text):
         text = await _call_openai(

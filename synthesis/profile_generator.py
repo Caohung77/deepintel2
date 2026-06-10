@@ -103,13 +103,17 @@ async def _call_llm(system: str, user: str) -> str:
         model = model.split("/", 1)[1]
 
     client = AsyncOpenAI(api_key=api_key)
+    # Deterministic output: greedy + fixed seed so repeated runs of the same
+    # company stay consistent (OpenAI honours `seed`).
     resp = await client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.2,
+        temperature=0.0,
+        top_p=1.0,
+        seed=int(os.getenv("LLM_SEED", "7")),
         max_tokens=1500,
     )
     return resp.choices[0].message.content or ""
