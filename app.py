@@ -33,7 +33,9 @@ WORKER_LOG = Path("/tmp/deepintel2_logs/worker.log")
 
 def submit_job(url: str, *, mode: str = "fast",
                max_pages: int = 60, max_product_pages: int = 6,
-               with_profile: bool = True, skip_enrichment: bool = False) -> str:
+               with_profile: bool = True, skip_enrichment: bool = False,
+               hr_no: str = "", register_court: str = "",
+               company_name: str = "") -> str:
     job_id = uuid.uuid4().hex[:12]
     spec = {
         "url": url,
@@ -42,6 +44,9 @@ def submit_job(url: str, *, mode: str = "fast",
         "max_product_pages": max_product_pages,
         "with_profile": with_profile,
         "skip_enrichment": skip_enrichment,
+        "hr_no": hr_no,
+        "register_court": register_court,
+        "company_name": company_name,
     }
     req_path = JOBS_DIR / f"{job_id}.req.json"
     tmp = req_path.with_suffix(req_path.suffix + ".tmp")
@@ -137,9 +142,20 @@ mode = st.radio(
 with st.form("scrape_form"):
     col_url, col_btn = st.columns([4, 1])
     with col_url:
-        url = st.text_input("Company website URL", placeholder="https://www.example-gmbh.de")
+        url = st.text_input("Company website URL (optional)", placeholder="https://www.example-gmbh.de")
     with col_btn:
         submitted = st.form_submit_button("Run", type="primary", use_container_width=True)
+
+    # Optional identity hints — override the auto-derived name + sharpen the insolvency search.
+    company_name = st.text_input(
+        "Firmenname (optional)", placeholder="Beispiel GmbH",
+        help="Übersteuert den automatisch erkannten Namen für die Tavily-/Insolvenz-Suche.",
+    )
+    col_hr, col_court = st.columns(2)
+    with col_hr:
+        hr_no = st.text_input("Handelsregister-Nr. (optional)", placeholder="HRA 12345")
+    with col_court:
+        register_court = st.text_input("Registergericht / Stadt (optional)", placeholder="Stuttgart")
 
     if mode == "full":
         with st.expander("Advanced options (full mode)"):
@@ -167,22 +183,29 @@ if not worker_alive():
         "Do NOT start with `streamlit run app.py` directly."
     )
 
-if submitted and url:
+if submitted and not (url.strip() or company_name.strip() or hr_no.strip()):
+    st.warning("Bitte eine Firmen-URL, eine Handelsregister-Nr. **oder** einen Firmennamen angeben.")
+elif submitted:
     if not worker_alive():
         st.error("Cannot submit job: worker is not running.")
     else:
-        with st.status(f"Submitting {mode} job to worker…", expanded=True) as status:
-            st.write(f"Target: `{url}`  ·  mode: `{mode}`")
+        target = url or (f"name: {company_name}" if company_name else f"HR: {hr_no} {register_court}".strip())
+        eff_mode = mode if url else "fast"   # no URL → discovery / enrichment path (no full crawl mode)
+        with st.status(f"Submitting {eff_mode} job to worker…", expanded=True) as status:
+            st.write(f"Target: `{target}`  ·  mode: `{eff_mode}`")
             job_id = submit_job(
                 url,
-                mode=mode,
+                mode=eff_mode,
                 max_pages=max_pages,
                 max_product_pages=max_product_pages,
                 with_profile=with_profile,
                 skip_enrichment=skip_enrichment,
+                hr_no=hr_no,
+                register_court=register_court,
+                company_name=company_name,
             )
             st.write(f"Job ID: `{job_id}`")
-            report, log = poll_job(job_id, timeout_s=60 if mode == "fast" else 600)
+            report, log = poll_job(job_id, timeout_s=60 if eff_mode == "fast" else 600)
             if report is None:
                 status.update(label="Pipeline failed", state="error")
                 st.error("Worker reported failure:")
@@ -214,12 +237,17 @@ def _kv(label: str, value: Any) -> None:
     st.markdown(f"**{label}:** {value}")
 
 
-def _render_insolvency(tavily: dict) -> None:
+def _render_insolvency(tavily: dict, register_input: dict | None = None) -> None:
     """Prominent insolvency status banner from enrichment.tavily.insolvency."""
     ins = (tavily or {}).get("insolvency") or {}
     verfahren = ins.get("insolvenzverfahren")
     insolvent = ins.get("insolvenz")
     evidence = ins.get("evidence") or []
+
+    reg = register_input or {}
+    reg_bits = [b for b in (reg.get("hr_no"), reg.get("register_court")) if b]
+    if reg_bits:
+        st.caption("🔎 Suche eingegrenzt auf: " + " · ".join(reg_bits))
 
     # Loud full-width banner — this is high-stakes risk info.
     if insolvent:
@@ -254,11 +282,31 @@ if report and ("extracted" in report or report.get("error_kind")):
 
     if report.get("error"):
         with st.container(border=True):
-            st.markdown("### 😕 Keine Analyse möglich")
-            st.markdown(report["error"])
-            st.markdown(
-                f"Geprüfte URL: [{report.get('source_url', '?')}]({report.get('source_url', '#')})"
-            )
+            if report.get("error_kind") == "identity_mismatch":
+                st.markdown("### 🚫 Kein eindeutiger Treffer")
+                st.markdown(report["error"])
+                im = report.get("identity_match") or {}
+                sr = im.get("site_register") or {}
+                if sr.get("register_number") or sr.get("register_court"):
+                    site_bits = " · ".join(b for b in (sr.get("register_number"), sr.get("register_court")) if b)
+                    st.caption(f"Impressum der Webseite zeigt: {site_bits}")
+                tried = im.get("tried") or []
+                if tried:
+                    with st.expander(f"Geprüfte Webseiten ({len(tried)})"):
+                        for t in tried:
+                            tsr = t.get("site_register") or {}
+                            detail = tsr.get("register_number") or t.get("reason") or "—"
+                            st.markdown(f"- `{t.get('url')}` → {detail}")
+                ri = report.get("register_input") or {}
+                exp = " · ".join(b for b in (ri.get("hr_no"), ri.get("register_court")) if b)
+                if exp:
+                    st.caption(f"Gesucht nach: {exp}")
+            else:
+                st.markdown("### 😕 Keine Analyse möglich")
+                st.markdown(report["error"])
+                st.markdown(
+                    f"Geprüfte URL: [{report.get('source_url', '?')}]({report.get('source_url', '#')})"
+                )
     else:
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -269,10 +317,18 @@ if report and ("extracted" in report or report.get("error_kind")):
             if metrics.get("total_ms"):
                 st.metric("Time", f"{metrics['total_ms'] / 1000:.1f}s")
 
+        # Identity verification badge (name-only flow that discovered + verified a site).
+        im = report.get("identity_match") or {}
+        if im.get("verified") is True:
+            sr = im.get("site_register") or {}
+            bits = " · ".join(b for b in (sr.get("register_number"), sr.get("register_court")) if b)
+            st.success(f"✅ Identität via Impressum bestätigt — {report.get('source_url', '')}"
+                       + (f" ({bits})" if bits else ""))
+
         # ----- Insolvenz-Check (prominent, top of page) -----
         fast_tavily = (report.get("enrichment") or {}).get("tavily") or {}
         if fast_tavily.get("insolvency"):
-            _render_insolvency(fast_tavily)
+            _render_insolvency(fast_tavily, report.get("register_input"))
 
         # ----- B2B Analyse-Profil (top of page) -----
         profile = report.get("profile") or {}
@@ -578,7 +634,7 @@ elif report:
         # Tavily news + competitors
         tavily = enrichment.get("tavily") or {}
         if tavily.get("insolvency"):
-            _render_insolvency(tavily)
+            _render_insolvency(tavily, report.get("register_input"))
         st.subheader("Competitor search snippets")
         cs = tavily.get("competitor_snippets") or []
         if cs:
@@ -634,4 +690,4 @@ elif report:
         )
 
 else:
-    st.info("Enter a company URL above and click **Run**.")
+    st.info("Enter a company URL **or** a company name above and click **Run**.")

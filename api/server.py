@@ -87,10 +87,32 @@ class AnalyzeOptions(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    domain: str = Field(
-        ...,
-        description="Company domain or full URL. Examples: 'siemens.com', 'https://www.siemens.com/'.",
+    domain: Optional[str] = Field(
+        default=None,
+        description="Company domain or full URL. Examples: 'siemens.com', 'https://www.siemens.com/'. "
+                    "Primary input (safest). When given with 'hr_no'/'register_court', the "
+                    "crawled Impressum is fact-checked against them (mismatch → 422). Optional — "
+                    "if omitted, the request becomes a name/HR-based insolvency + enrichment "
+                    "check (no website crawl).",
         examples=["siemens.com", "https://www.boniforce.de"],
+    )
+    hr_no: Optional[str] = Field(
+        default=None,
+        description="Handelsregister number, e.g. 'HRA 12345' or 'HRB 67890'. "
+                    "Sharpens the insolvency search for exact company disambiguation.",
+        examples=["HRA 12345"],
+    )
+    register_court: Optional[str] = Field(
+        default=None,
+        description="Registergericht / register city (the Amtsgericht), e.g. 'Stuttgart'. "
+                    "Sharpens the insolvency search.",
+        examples=["Stuttgart"],
+    )
+    company_name: Optional[str] = Field(
+        default=None,
+        description="Authoritative company name. Overrides the name derived from the "
+                    "site/Impressum for all enrichment (Tavily, sanctions, branch, insolvency).",
+        examples=["Beispiel GmbH"],
     )
     options: Optional[AnalyzeOptions] = Field(
         default=None,
@@ -198,6 +220,11 @@ def build_text_blocks(result: dict) -> list:
                   "value": "JA" if ins.get("insolvenzverfahren") else "nein"})
         B.append({"type": "keyvalue", "label": "Insolvent",
                   "value": "JA" if ins.get("insolvenz") else "nein"})
+        reg_in = result.get("register_input") or {}
+        if reg_in.get("hr_no"):
+            B.append({"type": "keyvalue", "label": "Handelsregister", "value": reg_in["hr_no"]})
+        if reg_in.get("register_court"):
+            B.append({"type": "keyvalue", "label": "Registergericht (Eingabe)", "value": reg_in["register_court"]})
         for ev in (ins.get("evidence") or [])[:3]:
             if ev.get("url"):
                 B.append({"type": "link", "label": ev.get("title") or "Beleg", "url": ev["url"]})
@@ -272,6 +299,13 @@ def build_text_blocks(result: dict) -> list:
         "structured analysis synchronously (~15-30 seconds). Includes home-page "
         "extraction, Impressum, optional Tavily/news enrichment, OpenSanctions "
         "check, SectorBench branch outlook, and a German B2B-Entscheider-Profil.\n\n"
+        "**Identity check** — pass `hr_no` (Handelsregister number, e.g. 'HRA 12345') "
+        "and `register_court` (Amtsgericht / register city, e.g. 'Stuttgart'). With a "
+        "`domain`, the crawled Impressum is fact-checked against them — a contradiction "
+        "returns **422 `identity_mismatch`** (the site belongs to a different company). "
+        "Without a `domain`, the request runs an insolvency + enrichment check on the "
+        "company (name resolved from the register if needed); both values also sharpen "
+        "the insolvency search and are echoed in `register_input`.\n\n"
         "**Response highlights**\n"
         "- `extracted` — facts (name, products `core_products_services`, etc.).\n"
         "- `enrichment.tavily.insolvency` — German insolvency check: booleans "
@@ -290,6 +324,7 @@ def build_text_blocks(result: dict) -> list:
                 "application/json": {
                     "example": {
                         "source_url": "https://www.nill-ritz.de/",
+                        "register_input": {"hr_no": "HRA 12345", "register_court": "Stuttgart"},
                         "extracted": {
                             "name": "Nill + Ritz CNC-Technik GmbH",
                             "industry": "Maschinenbau",
@@ -324,7 +359,12 @@ def build_text_blocks(result: dict) -> list:
     dependencies=[Depends(require_token)],
 )
 async def analyze(req: AnalyzeRequest, request: Request) -> dict:
-    url = normalise_url(req.domain)
+    if not ((req.domain or "").strip() or (req.company_name or "").strip() or (req.hr_no or "").strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide a company website (domain), a Handelsregister number (hr_no), or a company_name.",
+        )
+    url = normalise_url(req.domain) if (req.domain or "").strip() else ""
     opts = req.options or AnalyzeOptions()
 
     t0 = time.time()
@@ -334,6 +374,9 @@ async def analyze(req: AnalyzeRequest, request: Request) -> dict:
             with_profile=opts.with_profile,
             with_enrichment=opts.with_enrichment,
             with_branch=opts.with_branch,
+            hr_no=req.hr_no,
+            register_court=req.register_court,
+            company_name=req.company_name,
         )
     except Exception as exc:  # noqa: BLE001 — surface to client as 500
         return JSONResponse(

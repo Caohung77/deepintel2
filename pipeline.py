@@ -72,6 +72,9 @@ async def run_full_pipeline(
     max_product_pages: int = 6,
     with_profile: bool = True,
     skip_enrichment: bool = False,
+    hr_no: Optional[str] = None,
+    register_court: Optional[str] = None,
+    company_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Stage 1: site crawl
     site_report = await run_site_extractor(
@@ -79,6 +82,26 @@ async def run_full_pipeline(
         max_pages=max_pages,
         max_product_pages=max_product_pages,
     )
+
+    # Fact-check supplied Handelsregister data against the crawled Impressum.
+    identity_match = None
+    if (hr_no or "").strip() or (register_court or "").strip():
+        imp = site_report.get("impressum") or {}
+        imp_d = imp.get("data")
+        if isinstance(imp_d, list):
+            imp_d = imp_d[0] if imp_d else None
+        from enrichment.company_finder import _verify
+        identity_match = _verify(hr_no, register_court, imp_d if isinstance(imp_d, dict) else None)
+        if identity_match.get("verified") is False:
+            return {
+                "source_url": url,
+                "error": ("Supplied Handelsregister number / register court do not match the "
+                          "website's Impressum (no match) — the site likely belongs to a "
+                          "different company."),
+                "error_kind": "identity_mismatch",
+                "identity_match": identity_match,
+                "register_input": {"hr_no": hr_no, "register_court": register_court},
+            }
 
     enrichment: Dict[str, Any] = {
         "wikidata": [],
@@ -92,12 +115,15 @@ async def run_full_pipeline(
     }
 
     if not skip_enrichment:
-        company_name = _company_name(site_report) or url
+        company_name = (company_name or "").strip() or _company_name(site_report) or url
         persons = _person_names(site_report)
 
         # Stages 2-4 in parallel
         wd_task = asyncio.create_task(wikidata_lookup(company_name))
-        tv_task = asyncio.create_task(tavily_enrich(company_name, own_domain=url))
+        tv_task = asyncio.create_task(
+            tavily_enrich(company_name, own_domain=url,
+                          hr_no=hr_no, register_court=register_court)
+        )
         sn_task = asyncio.create_task(check_sanctions(company_name, persons))
         wd, tv, sn = await asyncio.gather(wd_task, tv_task, sn_task)
         enrichment["wikidata"] = wd
@@ -105,6 +131,10 @@ async def run_full_pipeline(
         enrichment["sanctions"] = sn
 
     full = {**site_report, "enrichment": enrichment, "profile": None}
+    if hr_no or register_court:
+        full["register_input"] = {"hr_no": hr_no, "register_court": register_court}
+    if identity_match is not None:
+        full["identity_match"] = identity_match
 
     # Stage 5: synthesis (lazy import to avoid loading openai unless needed)
     if with_profile:

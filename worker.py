@@ -99,19 +99,30 @@ async def _process_job(req_path: Path) -> None:
     t0 = time.time()
 
     try:
-        if mode == "fast":
+        hr_no = (spec.get("hr_no") or "").strip() or None
+        register_court = (spec.get("register_court") or "").strip() or None
+        company_name = (spec.get("company_name") or "").strip() or None
+        url = (spec.get("url") or "").strip()
+        # No URL → enrichment-only (fast_extract handles it); full pipeline would crawl.
+        if mode == "fast" or not url:
             report = await fast_extract(
-                spec["url"],
+                url,
                 with_profile=bool(spec.get("with_profile", True)),
                 with_enrichment=bool(spec.get("with_enrichment", True)),
+                hr_no=hr_no,
+                register_court=register_court,
+                company_name=company_name,
             )
         else:
             report = await run_full_pipeline(
-                spec["url"],
+                url,
                 max_pages=int(spec.get("max_pages", 60)),
                 max_product_pages=int(spec.get("max_product_pages", 6)),
                 with_profile=bool(spec.get("with_profile", True)),
                 skip_enrichment=bool(spec.get("skip_enrichment", False)),
+                hr_no=hr_no,
+                register_court=register_court,
+                company_name=company_name,
             )
         _write(out_path, json.dumps(report, indent=2, ensure_ascii=False, default=str))
         _write(status_path, "done")

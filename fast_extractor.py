@@ -427,18 +427,101 @@ def _to_report_shape(fast_result: dict) -> dict:
     }
 
 
+async def _enrich_only(company_name: str, *, hr_no: Optional[str] = None,
+                       register_court: Optional[str] = None,
+                       with_enrichment: bool = True) -> dict:
+    """Name-only path (no website supplied): run Tavily (incl. insolvency) + sanctions.
+
+    Branch + profile are website-derived and intentionally skipped here. The result
+    keeps the same top-level shape as fast_extract so build_text_blocks and the UI
+    renderers never KeyError on a missing key.
+    """
+    import time
+    t0 = time.time()
+    result = {
+        "source_url": "",
+        "register_input": {"hr_no": hr_no, "register_court": register_court}
+                          if (hr_no or register_court) else None,
+        "extracted": {"name": company_name},
+        "impressum": None,
+        "enrichment": {"tavily": {"competitor_snippets": [], "news": [], "risk_events": [],
+                                  "insolvency": {"insolvenzverfahren": False, "insolvenz": False,
+                                                 "answer": "", "evidence": []}},
+                       "sanctions": [], "wikidata": []},
+        "profile": None,
+        "metrics": {"name_only": True},
+    }
+    if with_enrichment:
+        try:
+            from enrichment.tavily_client import tavily_enrich
+            from enrichment.sanctions import check_sanctions
+            tv_task = asyncio.create_task(
+                tavily_enrich(company_name, hr_no=hr_no, register_court=register_court))
+            sn_task = asyncio.create_task(check_sanctions(company_name, []))
+            result["enrichment"]["tavily"] = await tv_task
+            result["enrichment"]["sanctions"] = await sn_task
+        except ImportError as e:
+            print(f"[name-only] enrichment unavailable: {e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[name-only] enrichment failed: {e}")
+    result["metrics"]["total_ms"] = round((time.time() - t0) * 1000)
+    return result
+
+
 async def fast_extract(url: str, *, with_profile: bool = True,
                        with_enrichment: bool = True,
-                       with_branch: bool = True) -> dict:
+                       with_branch: bool = True,
+                       hr_no: Optional[str] = None,
+                       register_court: Optional[str] = None,
+                       company_name: Optional[str] = None) -> dict:
     """Fetch landing page + Impressum + LLM extract. ~5-15s. No browser.
 
     Args:
         with_profile: also run synthesise_profile (4-block German B2B profile) via gpt-4o.
         with_enrichment: run Tavily competitor/news + OpenSanctions check in parallel.
         with_branch: classify into SectorBench branch + outlook + impact-on-company.
+        hr_no: Handelsregister number (e.g. 'HRA 12345'); sharpens insolvency search.
+        register_court: Registergericht / register city (e.g. 'Stuttgart'); sharpens insolvency search.
+        company_name: authoritative company name; overrides the name derived from the
+            site/Impressum for all enrichment (Tavily, sanctions, branch).
     """
     import time
     t0 = time.time()
+    name_override = (company_name or "").strip() or None
+    identity_match = None   # set when we discover + verify a site for a name-only request
+
+    # No website supplied → resolve what to do from the available identifiers.
+    # Priority: URL (handled below) > Handelsregister-Nr. (discover+verify) > name (search only).
+    if not (url or "").strip():
+        has_hr = bool((hr_no or "").strip())
+        if not name_override and not has_hr:
+            return {
+                "source_url": "",
+                "error": "Provide a company website URL, a Handelsregister number, or a company name.",
+                "error_kind": "no_input",
+                "metrics": {"total_ms": round((time.time() - t0) * 1000)},
+            }
+
+        # No website → no crawl. Run insolvency + enrichment on the company. If only an
+        # HR number was supplied, resolve a name from the register so the search has a
+        # subject (HR/court still sharpen the insolvency query downstream).
+        name_for_search = name_override
+        if not name_for_search and has_hr:
+            from enrichment.company_finder import _resolve_name
+            name_for_search = await _resolve_name(hr_no, register_court)
+        if not name_for_search:
+            return {
+                "source_url": "",
+                "error": ("Could not resolve a company from the supplied Handelsregister "
+                          "number / register court. Add a company name or website."),
+                "error_kind": "unresolved",
+                "register_input": {"hr_no": hr_no, "register_court": register_court},
+                "metrics": {"total_ms": round((time.time() - t0) * 1000)},
+            }
+        return await _enrich_only(
+            name_for_search, hr_no=hr_no, register_court=register_court,
+            with_enrichment=with_enrichment,
+        )
 
     async with httpx.AsyncClient(
         headers=HEADERS, follow_redirects=True, timeout=20.0,
@@ -516,10 +599,31 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         impressum_data = await llm_extract_impressum(imp_text, imp_url or url)
         imp_llm_ms = (time.time() - t_imp) * 1000
 
+    # Fact-check supplied Handelsregister data against the crawled Impressum.
+    # identity_match is already set for a discovered URL (verified upstream); only a
+    # caller-supplied URL needs checking here. A contradiction → refuse before enrichment.
+    if identity_match is None and ((hr_no or "").strip() or (register_court or "").strip()):
+        from enrichment.company_finder import _verify
+        identity_match = _verify(hr_no, register_court, impressum_data)
+        if identity_match.get("verified") is False:
+            return {
+                "source_url": url,
+                "error": ("Supplied Handelsregister number / register court do not match the "
+                          "website's Impressum (no match) — the site likely belongs to a "
+                          "different company."),
+                "error_kind": "identity_mismatch",
+                "identity_match": identity_match,
+                "register_input": {"hr_no": hr_no, "register_court": register_court},
+                "impressum": {"url": imp_url, "data": impressum_data} if imp_url else None,
+                "metrics": {"total_ms": round((time.time() - t0) * 1000)},
+            }
+
     extract_total_ms = (time.time() - t0) * 1000
 
     result = {
         "source_url": url,
+        "register_input": {"hr_no": hr_no, "register_court": register_court}
+                          if (hr_no or register_court) else None,
         "extracted": data or {},
         "impressum": {
             "url": imp_url,
@@ -543,7 +647,7 @@ async def fast_extract(url: str, *, with_profile: bool = True,
 
     # ---- Enrichment + synthesis (optional) ----
     if with_enrichment or with_profile:
-        company_name = (data or {}).get("name") or (impressum_data or {}).get("company_name") or url
+        company_name = name_override or (data or {}).get("name") or (impressum_data or {}).get("company_name") or url
         persons = (impressum_data or {}).get("represented_by") or []
         if isinstance(persons, str):
             persons = [persons]
@@ -557,7 +661,10 @@ async def fast_extract(url: str, *, with_profile: bool = True,
             try:
                 from enrichment.tavily_client import tavily_enrich
                 from enrichment.sanctions import check_sanctions
-                tavily_task = asyncio.create_task(tavily_enrich(company_name, own_domain=url))
+                tavily_task = asyncio.create_task(
+                    tavily_enrich(company_name, own_domain=url,
+                                  hr_no=hr_no, register_court=register_court)
+                )
                 sanctions_task = asyncio.create_task(check_sanctions(company_name, persons))
             except ImportError as e:
                 print(f"[fast] enrichment unavailable: {e}")
@@ -592,12 +699,15 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         try:
             from synthesis.branch_generator import analyze_branch
             branch_t0 = time.time()
-            company_name = (data or {}).get("name") or ((impressum_data or {}).get("company_name")) or ""
+            company_name = name_override or (data or {}).get("name") or ((impressum_data or {}).get("company_name")) or ""
             result["branch"] = await analyze_branch(data or {}, company_name=company_name)
             result["metrics"]["branch_ms"] = round((time.time() - branch_t0) * 1000)
         except Exception as e:  # noqa: BLE001
             print(f"[fast] branch analysis failed: {e}")
             result["branch"] = {"error": str(e)}
+
+    if identity_match is not None:
+        result["identity_match"] = identity_match
 
     result["metrics"]["total_ms"] = round((time.time() - t0) * 1000)
     return result

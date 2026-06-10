@@ -12,8 +12,13 @@ export DEEPINTEL_JOBS_DIR="${DEEPINTEL_JOBS_DIR:-/tmp/deepintel2_jobs}"
 mkdir -p "$DEEPINTEL_JOBS_DIR"
 mkdir -p /tmp/deepintel2_logs
 
-# Kill any prior worker
-pkill -f "deepintel2/worker.py" 2>/dev/null || true
+# Kill any prior worker. The process is launched as `python worker.py` (relative,
+# after the cd above), so its cmdline never contains "deepintel2/worker.py" — the old
+# pattern matched nothing and stale workers piled up. Kill the precise prior worker via
+# the pidfile it writes at startup, then sweep any stragglers by the real cmdline.
+PRIOR_PID_FILE="$DEEPINTEL_JOBS_DIR/worker.pid"
+[ -f "$PRIOR_PID_FILE" ] && kill "$(cat "$PRIOR_PID_FILE")" 2>/dev/null || true
+pkill -f "[w]orker.py" 2>/dev/null || true
 sleep 1
 
 # Start worker BEFORE streamlit so it inherits clean process state

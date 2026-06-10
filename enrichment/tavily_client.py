@@ -276,8 +276,14 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
     }
 
 
-async def tavily_enrich(company_name: str, own_domain: Optional[str] = None) -> dict:
-    """Run 3 Tavily searches and normalise into competitors / news / risk_events."""
+async def tavily_enrich(company_name: str, own_domain: Optional[str] = None,
+                        hr_no: Optional[str] = None,
+                        register_court: Optional[str] = None) -> dict:
+    """Run 3 Tavily searches and normalise into competitors / news / risk_events.
+
+    hr_no / register_court (Handelsregister no. + Registergericht) are woven into
+    the insolvency query for exact company disambiguation when supplied.
+    """
     api_key = os.getenv("TAVILY_API_KEY")
     _empty_insolvency = {
         "insolvenzverfahren": False,
@@ -302,9 +308,16 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None) -> 
         comp_q = f'"{company_name}" competitors OR Wettbewerber OR alternatives'
         risk_q = f'"{company_name}" ({RISK_KEYWORDS})'
         news_q = f'"{company_name}"'
+        # Handelsregister hint sharpens disambiguation (same company name, different cities).
+        reg_bits = []
+        if hr_no:
+            reg_bits.append(hr_no.strip())
+        if register_court:
+            reg_bits.append(f"Amtsgericht {register_court.strip()}")
+        reg_hint = f" ({', '.join(reg_bits)})" if reg_bits else ""
         inso_q = (
-            f'Ist die Firma "{company_name}" insolvent? '
-            f'Gibt es ein Insolvenzverfahren gegen "{company_name}"?'
+            f'Ist die Firma "{company_name}"{reg_hint} insolvent? '
+            f'Gibt es ein Insolvenzverfahren gegen "{company_name}"{reg_hint}?'
         )
 
         comp_raw, risk_raw, news_raw, inso_raw = await asyncio.gather(
