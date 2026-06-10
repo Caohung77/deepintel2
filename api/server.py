@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.2.2"
+API_VERSION = "0.2.3"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "
@@ -129,86 +129,138 @@ async def health() -> dict:
     return {"status": "ok", "version": API_VERSION}
 
 
-def _md_kv(lines: list, label: str, value) -> None:
-    if value:
-        if isinstance(value, list):
-            value = ", ".join(str(v) for v in value)
-        lines.append(f"- **{label}:** {value}")
+_MD_LINK_RX = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 
 
-def render_markdown(result: dict) -> str:
-    """Human-readable Markdown rendering of the analysis bundle, returned in the
-    `markdown` field next to the structured JSON."""
+def _clean_inline(s: str) -> str:
+    """Strip inline Markdown to plain text."""
+    if not s:
+        return ""
+    s = _MD_LINK_RX.sub(r"\1 (\2)", s)
+    s = re.sub(r"`+", "", s)
+    s = re.sub(r"\*\*|__|\*|_", "", s)
+    return s.strip()
+
+
+def _kv(label: str, value) -> Optional[dict]:
+    if not value:
+        return None
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value)
+    return {"type": "keyvalue", "label": label, "value": str(value)}
+
+
+def _md_to_blocks(md: str) -> list:
+    """Convert a Markdown sub-section (branch outlook, B2B profile) into typed
+    plain-text blocks: heading / bullet / paragraph."""
+    blocks: list = []
+    for raw in (md or "").splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        h = re.match(r"^#{1,6}\s*(.+)$", ln)
+        if h:
+            blocks.append({"type": "heading", "text": _clean_inline(h.group(1))})
+            continue
+        # a line that is entirely bold → treat as heading
+        hb = re.match(r"^\*\*(.+?)\*\*:?$", ln)
+        if hb:
+            blocks.append({"type": "heading", "text": _clean_inline(hb.group(1))})
+            continue
+        bl = re.match(r"^[-*•]\s+(.+)$", ln)
+        if bl:
+            blocks.append({"type": "bullet", "text": _clean_inline(bl.group(1))})
+            continue
+        blocks.append({"type": "paragraph", "text": _clean_inline(ln)})
+    return blocks
+
+
+def build_text_blocks(result: dict) -> list:
+    """Structured plain-text rendering: an ordered list of typed blocks so the
+    client decides how to display each (heading/bullet/keyvalue/link/...).
+    Block types: title, subtitle, heading, paragraph, bullet,
+    keyvalue {label, value}, link {label, url}."""
     e = result.get("extracted") or {}
-    L: list = []
+    B: list = []
 
     name = e.get("name") or result.get("source_url") or "Unternehmen"
-    L.append(f"# {name}")
+    B.append({"type": "title", "text": name})
     if e.get("tagline"):
-        L.append(f"*{e['tagline']}*")
+        B.append({"type": "subtitle", "text": e["tagline"]})
     if e.get("elevator_pitch"):
-        L += ["", e["elevator_pitch"]]
+        B.append({"type": "paragraph", "text": e["elevator_pitch"]})
 
     # Insolvency — surfaced first, it is high-stakes risk info.
     ins = ((result.get("enrichment") or {}).get("tavily") or {}).get("insolvency") or {}
     if ins:
-        L += ["", "## ⚖️ Insolvenz-Check"]
-        L.append(f"- **Insolvenzverfahren (laufend):** {'JA 🔴' if ins.get('insolvenzverfahren') else 'nein 🟢'}")
-        L.append(f"- **Insolvent:** {'JA 🔴' if ins.get('insolvenz') else 'nein 🟢'}")
+        B.append({"type": "heading", "text": "Insolvenz-Check"})
+        B.append({"type": "keyvalue", "label": "Insolvenzverfahren (laufend)",
+                  "value": "JA" if ins.get("insolvenzverfahren") else "nein"})
+        B.append({"type": "keyvalue", "label": "Insolvent",
+                  "value": "JA" if ins.get("insolvenz") else "nein"})
         for ev in (ins.get("evidence") or [])[:3]:
             if ev.get("url"):
-                L.append(f"  - Beleg: [{ev.get('title') or ev['url']}]({ev['url']})")
+                B.append({"type": "link", "label": ev.get("title") or "Beleg", "url": ev["url"]})
 
     if e.get("what_they_do"):
-        L += ["", "## Was sie machen", e["what_they_do"]]
+        B.append({"type": "heading", "text": "Was sie machen"})
+        B.append({"type": "paragraph", "text": e["what_they_do"]})
 
-    facts: list = []
-    _md_kv(facts, "Branche", e.get("industry"))
-    _md_kv(facts, "HQ", e.get("headquarters"))
-    _md_kv(facts, "Gegründet", e.get("founded"))
-    _md_kv(facts, "Mitarbeiter", e.get("employee_count"))
-    _md_kv(facts, "Geschäftsmodell", e.get("business_model"))
-    _md_kv(facts, "Sprachen", e.get("languages"))
+    facts = [b for b in (
+        _kv("Branche", e.get("industry")),
+        _kv("HQ", e.get("headquarters")),
+        _kv("Gegründet", e.get("founded")),
+        _kv("Mitarbeiter", e.get("employee_count")),
+        _kv("Geschäftsmodell", e.get("business_model")),
+        _kv("Sprachen", e.get("languages")),
+    ) if b]
     if facts:
-        L += ["", "## Eckdaten"] + facts
+        B.append({"type": "heading", "text": "Eckdaten"})
+        B += facts
 
     if e.get("target_customers"):
-        L += ["", "## Zielkunden", ", ".join(e["target_customers"])]
+        B.append({"type": "heading", "text": "Zielkunden"})
+        for tc in e["target_customers"]:
+            B.append({"type": "bullet", "text": str(tc)})
 
     ps = e.get("core_products_services") or []
     if ps:
-        L += ["", f"## Produkte & Services ({len(ps)})"]
+        B.append({"type": "heading", "text": f"Produkte & Services ({len(ps)})"})
         for it in ps:
-            line = f"- **{it.get('name') or '—'}**"
+            label = it.get("name") or "-"
             if it.get("category"):
-                line += f" — _{it['category']}_"
-            L.append(line)
+                label += f" ({it['category']})"
+            B.append({"type": "bullet", "text": label})
             if it.get("description"):
-                L.append(f"  {it['description']}")
+                B.append({"type": "paragraph", "text": it["description"]})
 
     imp = (result.get("impressum") or {}).get("data") if result.get("impressum") else None
     if imp:
-        L += ["", "## Impressum"]
-        _md_kv(L, "Firma", imp.get("company_name"))
+        B.append({"type": "heading", "text": "Impressum"})
         addr = ", ".join(p for p in [imp.get("street"), imp.get("postal_code"),
                                      imp.get("city"), imp.get("country")] if p)
-        _md_kv(L, "Adresse", addr)
-        _md_kv(L, "Registergericht", imp.get("register_court"))
-        _md_kv(L, "HRB/HRA", imp.get("register_number"))
-        _md_kv(L, "USt-IdNr.", imp.get("vat_id"))
-        _md_kv(L, "E-Mail", imp.get("email"))
-        _md_kv(L, "Telefon", imp.get("phone"))
+        B += [b for b in (
+            _kv("Firma", imp.get("company_name")),
+            _kv("Adresse", addr),
+            _kv("Registergericht", imp.get("register_court")),
+            _kv("HRB/HRA", imp.get("register_number")),
+            _kv("USt-IdNr.", imp.get("vat_id")),
+            _kv("E-Mail", imp.get("email")),
+            _kv("Telefon", imp.get("phone")),
+        ) if b]
 
     branch = result.get("branch") or {}
     if branch and not branch.get("error") and branch.get("outlook_markdown"):
         bn = branch.get("branch_name_de") or branch.get("branch_key") or ""
-        L += ["", f"## Branche & Ausblick — {bn}", branch["outlook_markdown"]]
+        B.append({"type": "heading", "text": f"Branche & Ausblick - {bn}"})
+        B += _md_to_blocks(branch["outlook_markdown"])
 
     prof = result.get("profile") or {}
     if prof.get("rendered_markdown"):
-        L += ["", "## B2B-Entscheider-Profil", prof["rendered_markdown"]]
+        B.append({"type": "heading", "text": "B2B-Entscheider-Profil"})
+        B += _md_to_blocks(prof["rendered_markdown"])
 
-    return "\n".join(L).strip()
+    return B
 
 
 @app.post(
@@ -250,8 +302,8 @@ async def analyze(req: AnalyzeRequest, request: Request) -> dict:
     if result.get("error") and "extracted" not in result:
         return JSONResponse(status_code=422, content=result)
 
-    # Markdown rendering alongside the structured JSON.
-    result["markdown"] = render_markdown(result)
+    # Structured plain-text blocks alongside the data JSON.
+    result["text"] = build_text_blocks(result)
 
     return result
 

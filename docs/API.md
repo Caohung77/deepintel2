@@ -69,12 +69,35 @@ Latency drops to ~5 s. Returns extracted + impressum only.
 
 Successful analysis. Fields are stable; consumers should ignore unknown keys.
 
-The response carries both the structured data **and** a `markdown` field — a ready-to-display human-readable rendering of the same bundle (company summary, Insolvenz-Check, Eckdaten, products, Impressum, branch outlook, B2B profile). Use the JSON for machine processing, the `markdown` for direct display.
+The response carries both the structured data **and** a `text` field — an ordered array of typed plain-text blocks (no Markdown) so the client decides how to render each one. Block types:
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `title` | `text` | Company name (top). |
+| `subtitle` | `text` | Tagline. |
+| `heading` | `text` | Section heading (e.g. "Insolvenz-Check", "Impressum"). |
+| `paragraph` | `text` | Free text paragraph. |
+| `bullet` | `text` | A list item. |
+| `keyvalue` | `label`, `value` | A labelled fact (e.g. label "Insolvent", value "nein"). |
+| `link` | `label`, `url` | A source/reference link. |
+
+```jsonc
+"text": [
+  { "type": "title", "text": "Nill + Ritz CNC-Technik GmbH" },
+  { "type": "paragraph", "text": "Nill+Ritz stellt vollautomatische Markierstationen ..." },
+  { "type": "heading", "text": "Insolvenz-Check" },
+  { "type": "keyvalue", "label": "Insolvenzverfahren (laufend)", "value": "JA" },
+  { "type": "keyvalue", "label": "Insolvent", "value": "nein" },
+  { "type": "link", "label": "Breit gefächerte Insolvenzen ...", "url": "https://..." }
+]
+```
+
+Use the structured JSON for machine processing, the `text` blocks for display.
 
 ```jsonc
 {
   "source_url": "https://siemens.com/",
-  "markdown": "# Siemens AG\n*Technology to...*\n\n## ⚖️ Insolvenz-Check\n...",  // human-readable rendering of this bundle
+  "text": [ /* ordered typed plain-text blocks — see "text" section below */ ],
   "extracted": {
     "name": "Siemens AG",
     "tagline": "Technology to transform the everyday",
