@@ -94,7 +94,10 @@ async def _resolve_name(hr_no: Optional[str], register_court: Optional[str]) -> 
     if not key or not hr_no:
         return None
     from enrichment.tavily_client import _norm_results, _tavily_search
-    query = " ".join(p for p in (hr_no, register_court, "Firma Unternehmen") if p)
+    # Keep the query minimal — just HR number + city. Extra terms ("Amtsgericht",
+    # "Firma Unternehmen") pollute the results and make Tavily's answer name the wrong
+    # company (e.g. HRB 4745 Bad Kreuznach resolved wrong with extra words; clean → F. Klein GmbH).
+    query = " ".join(p for p in (hr_no, register_court) if p)
     try:
         async with httpx.AsyncClient() as cx:
             raw = await _tavily_search(cx, query, key, max_results=6, include_answer=True)
