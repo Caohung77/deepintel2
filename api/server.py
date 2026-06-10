@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.2.4"
+API_VERSION = "0.2.5"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "
@@ -271,9 +271,56 @@ def build_text_blocks(result: dict) -> list:
         "Submits a domain through the full fast-mode pipeline and returns the "
         "structured analysis synchronously (~15-30 seconds). Includes home-page "
         "extraction, Impressum, optional Tavily/news enrichment, OpenSanctions "
-        "check, SectorBench branch outlook, and a German B2B-Entscheider-Profil."
+        "check, SectorBench branch outlook, and a German B2B-Entscheider-Profil.\n\n"
+        "**Response highlights**\n"
+        "- `extracted` — facts (name, products `core_products_services`, etc.).\n"
+        "- `enrichment.tavily.insolvency` — German insolvency check: booleans "
+        "`insolvenzverfahren` (proceeding active) + `insolvenz` (already insolvent) "
+        "plus `evidence[]`.\n"
+        "- `text` — ordered array of typed plain-text blocks "
+        "(`title|subtitle|heading|paragraph|bullet|keyvalue|link`) for direct display.\n\n"
+        "**Determinism:** extraction runs at `temperature=0`/`top_p=0` (Gemini, greedy — "
+        "no seed support) and synthesis at `temperature=0` + fixed `seed` (OpenAI), so "
+        "repeated requests for the same site stay consistent."
     ),
-    response_description="Analysis bundle: extracted facts, impressum, enrichment, profile, branch.",
+    response_description="Analysis bundle: extracted, impressum, enrichment (incl. insolvency), profile, branch, and text blocks.",
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "source_url": "https://www.nill-ritz.de/",
+                        "extracted": {
+                            "name": "Nill + Ritz CNC-Technik GmbH",
+                            "industry": "Maschinenbau",
+                            "core_products_services": [
+                                {"name": "Laserbeschriftungsanlage", "category": "Markiersysteme"}
+                            ],
+                        },
+                        "enrichment": {
+                            "tavily": {
+                                "insolvency": {
+                                    "insolvenzverfahren": True,
+                                    "insolvenz": False,
+                                    "answer": "",
+                                    "evidence": [{"title": "...", "url": "https://..."}],
+                                }
+                            },
+                            "sanctions": [],
+                        },
+                        "text": [
+                            {"type": "title", "text": "Nill + Ritz CNC-Technik GmbH"},
+                            {"type": "heading", "text": "Insolvenz-Check"},
+                            {"type": "keyvalue", "label": "Insolvenzverfahren (laufend)", "value": "JA"},
+                            {"type": "keyvalue", "label": "Insolvent", "value": "nein"},
+                            {"type": "link", "label": "Beleg", "url": "https://..."},
+                        ],
+                        "metrics": {"total_ms": 22900},
+                    }
+                }
+            }
+        }
+    },
     dependencies=[Depends(require_token)],
 )
 async def analyze(req: AnalyzeRequest, request: Request) -> dict:
