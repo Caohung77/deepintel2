@@ -265,10 +265,28 @@ issuing a new token and revoking the old one (overwrite env, restart).
 
 ## Rate limiting
 
-No hard limit at the API layer in v0.1.x. Bottleneck is downstream:
+No hard limit at the API layer in v0.2.x. Bottleneck is downstream:
 OpenAI (gpt-4o) ~10 req/min on tier 1, Gemini ~15 req/s. Tavily free tier
 1000 queries/month. Plan calls accordingly or pass `with_enrichment=false`
 for high-volume use.
+
+## Determinism / reproducibility
+
+The analysis is tuned for **consistent results across repeated requests** for the
+same site (so e.g. `core_products_services` doesn't reshuffle between calls):
+
+- **Extraction (Gemini)** runs at `temperature=0` + `top_p=0` (greedy decoding),
+  and the prompt instructs the model to list products/services in page order
+  without reordering. Note: Gemini's OpenAI-compatible endpoint does **not**
+  accept a `seed` parameter, so determinism relies on greedy decoding.
+- **Synthesis (OpenAI gpt-4o — profile & branch outlook)** runs at
+  `temperature=0` + `top_p=1` + a fixed `seed` (server env `LLM_SEED`, default
+  `7`), which OpenAI honours for reproducible output.
+
+Caveat: this makes repeats highly stable (verified identical in testing) but not
+a 100% hard guarantee — Gemini retains minor server-side nondeterminism, and a
+site whose content changes will naturally yield different results. There is no
+caching layer for the extraction itself; every request re-runs the models.
 
 ## Common integration patterns
 
