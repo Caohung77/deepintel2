@@ -69,9 +69,12 @@ Latency drops to ~5 s. Returns extracted + impressum only.
 
 Successful analysis. Fields are stable; consumers should ignore unknown keys.
 
+The response carries both the structured data **and** a `markdown` field — a ready-to-display human-readable rendering of the same bundle (company summary, Insolvenz-Check, Eckdaten, products, Impressum, branch outlook, B2B profile). Use the JSON for machine processing, the `markdown` for direct display.
+
 ```jsonc
 {
   "source_url": "https://siemens.com/",
+  "markdown": "# Siemens AG\n*Technology to...*\n\n## ⚖️ Insolvenz-Check\n...",  // human-readable rendering of this bundle
   "extracted": {
     "name": "Siemens AG",
     "tagline": "Technology to transform the everyday",

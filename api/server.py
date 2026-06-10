@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.1.2"
+API_VERSION = "0.2.2"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "
@@ -129,6 +129,88 @@ async def health() -> dict:
     return {"status": "ok", "version": API_VERSION}
 
 
+def _md_kv(lines: list, label: str, value) -> None:
+    if value:
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        lines.append(f"- **{label}:** {value}")
+
+
+def render_markdown(result: dict) -> str:
+    """Human-readable Markdown rendering of the analysis bundle, returned in the
+    `markdown` field next to the structured JSON."""
+    e = result.get("extracted") or {}
+    L: list = []
+
+    name = e.get("name") or result.get("source_url") or "Unternehmen"
+    L.append(f"# {name}")
+    if e.get("tagline"):
+        L.append(f"*{e['tagline']}*")
+    if e.get("elevator_pitch"):
+        L += ["", e["elevator_pitch"]]
+
+    # Insolvency — surfaced first, it is high-stakes risk info.
+    ins = ((result.get("enrichment") or {}).get("tavily") or {}).get("insolvency") or {}
+    if ins:
+        L += ["", "## ⚖️ Insolvenz-Check"]
+        L.append(f"- **Insolvenzverfahren (laufend):** {'JA 🔴' if ins.get('insolvenzverfahren') else 'nein 🟢'}")
+        L.append(f"- **Insolvent:** {'JA 🔴' if ins.get('insolvenz') else 'nein 🟢'}")
+        for ev in (ins.get("evidence") or [])[:3]:
+            if ev.get("url"):
+                L.append(f"  - Beleg: [{ev.get('title') or ev['url']}]({ev['url']})")
+
+    if e.get("what_they_do"):
+        L += ["", "## Was sie machen", e["what_they_do"]]
+
+    facts: list = []
+    _md_kv(facts, "Branche", e.get("industry"))
+    _md_kv(facts, "HQ", e.get("headquarters"))
+    _md_kv(facts, "Gegründet", e.get("founded"))
+    _md_kv(facts, "Mitarbeiter", e.get("employee_count"))
+    _md_kv(facts, "Geschäftsmodell", e.get("business_model"))
+    _md_kv(facts, "Sprachen", e.get("languages"))
+    if facts:
+        L += ["", "## Eckdaten"] + facts
+
+    if e.get("target_customers"):
+        L += ["", "## Zielkunden", ", ".join(e["target_customers"])]
+
+    ps = e.get("core_products_services") or []
+    if ps:
+        L += ["", f"## Produkte & Services ({len(ps)})"]
+        for it in ps:
+            line = f"- **{it.get('name') or '—'}**"
+            if it.get("category"):
+                line += f" — _{it['category']}_"
+            L.append(line)
+            if it.get("description"):
+                L.append(f"  {it['description']}")
+
+    imp = (result.get("impressum") or {}).get("data") if result.get("impressum") else None
+    if imp:
+        L += ["", "## Impressum"]
+        _md_kv(L, "Firma", imp.get("company_name"))
+        addr = ", ".join(p for p in [imp.get("street"), imp.get("postal_code"),
+                                     imp.get("city"), imp.get("country")] if p)
+        _md_kv(L, "Adresse", addr)
+        _md_kv(L, "Registergericht", imp.get("register_court"))
+        _md_kv(L, "HRB/HRA", imp.get("register_number"))
+        _md_kv(L, "USt-IdNr.", imp.get("vat_id"))
+        _md_kv(L, "E-Mail", imp.get("email"))
+        _md_kv(L, "Telefon", imp.get("phone"))
+
+    branch = result.get("branch") or {}
+    if branch and not branch.get("error") and branch.get("outlook_markdown"):
+        bn = branch.get("branch_name_de") or branch.get("branch_key") or ""
+        L += ["", f"## Branche & Ausblick — {bn}", branch["outlook_markdown"]]
+
+    prof = result.get("profile") or {}
+    if prof.get("rendered_markdown"):
+        L += ["", "## B2B-Entscheider-Profil", prof["rendered_markdown"]]
+
+    return "\n".join(L).strip()
+
+
 @app.post(
     "/api/analyze",
     tags=["analysis"],
@@ -167,6 +249,9 @@ async def analyze(req: AnalyzeRequest, request: Request) -> dict:
     # (unprocessable entity) so clients can branch easily.
     if result.get("error") and "extracted" not in result:
         return JSONResponse(status_code=422, content=result)
+
+    # Markdown rendering alongside the structured JSON.
+    result["markdown"] = render_markdown(result)
 
     return result
 

@@ -12,7 +12,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: deepintel2:0.2.1
+    image: deepintel2:0.2.2
     container_name: deepintel2
     restart: unless-stopped
     env_file:
