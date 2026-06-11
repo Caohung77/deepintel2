@@ -191,13 +191,17 @@ def _core_tokens(name: str) -> List[str]:
     return [t for t in toks if len(t) >= 3 and t not in _LEGAL_SUFFIX]
 
 
+def _token_matches(text_low: str, token: str) -> bool:
+    """Whole-word match. Substring matching falsely tied 'Bau' to 'Bauer',
+    attributing another firm's insolvency to a co-named company."""
+    return re.search(rf"\b{re.escape(token)}\b", text_low) is not None
+
+
 def _token_positions(text_low: str, tokens: List[str]) -> List[int]:
     pos: List[int] = []
     for t in tokens:
-        start = 0
-        while (i := text_low.find(t, start)) >= 0:
-            pos.append(i)
-            start = i + len(t)
+        for m in re.finditer(rf"\b{re.escape(t)}\b", text_low):
+            pos.append(m.start())
     return pos
 
 
@@ -249,7 +253,7 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
         name_pos = _token_positions(low, core)
         # Require the company to be clearly mentioned (>=2 distinct core tokens,
         # or the single token if the name has only one).
-        distinct = sum(1 for t in core if t in low)
+        distinct = sum(1 for t in core if _token_matches(low, t))
         if distinct < min(2, len(core)) or not name_pos:
             continue
 
@@ -275,18 +279,24 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
             # These come from the insolvency-specific queries, so they are insolvency
             # context. They enrich the evidence list ONLY — they never set the boolean.
             title_low = (it.get("title") or "").lower()
-            if sum(1 for t in core if t in title_low) >= min(2, len(core)):
+            if sum(1 for t in core if _token_matches(title_low, t)) >= min(2, len(core)):
                 named_hits.append(it)
 
     hit_urls = {h.get("url") for h in hits}
-    ev = hits + [n for n in named_hits if n.get("url") not in hit_urls]
+    # Title-named pages only SUPPLEMENT a real signal hit — never stand alone. With no
+    # attributable signal the company reads clean, so showing same-named pages (e.g. a
+    # solvent firm's own reports) under "Belege" would be misleading. No fallback to raw
+    # insolvency-search items either, for the same reason.
+    ev = list(hits)
+    if hits:
+        ev += [n for n in named_hits if n.get("url") not in hit_urls]
     return {
         "insolvenzverfahren": verfahren,
         "insolvenz": False,
         "answer": answer,
         "evidence": [
             {"title": it.get("title"), "url": it.get("url"), "snippet": it.get("snippet")}
-            for it in (ev or items)[:5]
+            for it in ev[:5]
         ],
     }
 
