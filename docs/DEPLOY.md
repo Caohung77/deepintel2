@@ -1,6 +1,6 @@
 # Production Deployment
 
-Target host: `87.106.22.81`
+Target host: `87.106.211.81`
 Target domain: `deepintel.boniforce.de`
 Target path: `/root/deepintel`
 Reverse proxy: Traefik (already running on host)
@@ -10,7 +10,7 @@ Reverse proxy: Traefik (already running on host)
 Create an A record:
 
 ```
-deepintel.boniforce.de.  A  87.106.22.81
+deepintel.boniforce.de.  A  87.106.211.81
 ```
 
 Wait for propagation: `dig deepintel.boniforce.de +short` should return the IP.
@@ -41,7 +41,7 @@ If your Traefik resolver isn't called `letsencrypt`, update
 ## 4. Deploy
 
 ```bash
-ssh root@87.106.22.81
+ssh root@87.106.211.81
 
 # First time:
 mkdir -p /root/deepintel
