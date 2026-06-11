@@ -235,7 +235,7 @@ Use the structured JSON for machine processing, the `text` blocks for display.
 
 Returned inside the standard `POST /api/analyze` response (no separate endpoint). Requires `options.with_enrichment = true` (the default); with enrichment disabled the booleans stay `false` and `evidence` is empty.
 
-**Disambiguation:** supply request fields `hr_no` (Handelsregister number) and `register_court` (Amtsgericht) to pin the search to the exact entity — they are woven into the insolvency query (`Ist die Firma "X" (HRA 12345, Amtsgericht Stuttgart) insolvent?`). Recommended when the company name is common across multiple cities. Echoed back in `register_input` + the Insolvenz-Check `text` blocks.
+**Disambiguation:** supply request fields `hr_no` (Handelsregister number) and `register_court` (Amtsgericht). `hr_no` sharpens the **news** query — it pins company identity for co-named firms (the quoted name + the HR number). `register_court` drives the **amtlich** portal lookup; the news query deliberately omits it because the insolvency court differs from the register court (e.g. registered AG Stuttgart, proceeding AG Ludwigsburg), so forcing it would bias against the real filing. Both are recommended when the name is common across cities, and **both are required** for the amtlich tier. Echoed back in `register_input` + the Insolvenz-Check `text` blocks.
 
 Two independent tiers by **source** (not by proceeding stage): a soft NEWS signal and a hard AMTLICH confirmation.
 
@@ -246,7 +246,7 @@ Two independent tiers by **source** (not by proceeding stage): a soft NEWS signa
 | `confirmed` | bool | `true` once the official portal was actually queried (any outcome). `false` = portal not reached (no register entry supplied / browser unavailable) → trust only the news `insolvenzverfahren`. |
 | `source` | string | `"tavily"` (news heuristic) or `"insolvenzbekanntmachungen.de"` (official portal). |
 | `answer` | string | Tavily's free-text summary of the insolvency question. Returned for context but **not** used to derive the booleans — it can contradict them (it echoes the dominant search narrative), so rely on the booleans + `evidence`, not this. |
-| `evidence` | array | Up to 5 supporting sources `{title, url}` — the official Bekanntmachung when amtlich, otherwise news/registers — for human verification. |
+| `evidence` | array | Up to 5 sources `{title, url}` **attributable to this company** — the official Bekanntmachung when amtlich, otherwise the news/aggregator pages that named the company. A clean company returns an empty list (no fallback to generic insolvency hits that aren't tied to it). |
 
 Typical states:
 - Healthy, portal checked: `{"insolvenzverfahren": false, "insolvenz": false, "confirmed": true}` — official portal queried, no entry.
@@ -255,10 +255,14 @@ Typical states:
 - News reports a proceeding but the portal has no entry yet (**still investigate — do NOT treat as clear**): `{"insolvenzverfahren": true, "insolvenz": false, "confirmed": true}`
 
 **How it works:**
-- *News tier* — a Tavily search (`search_depth=advanced`, `time_range=year`) asks whether the company is insolvent; signals are attributed to the queried company by court-record proximity, so firms co-listed on multi-company insolvency pages don't false-positive. Sets `insolvenzverfahren` only.
+- *News tier* — Tavily searches (`search_depth=advanced`, `time_range=year`) with a keyword-first query using the exact quoted company name (pinned by the `hr_no` number), a proceeding-markers pass (`Insolvenzverwalter` / `Insolvenzantrag` / `eröffnet` / `Aktenzeichen`), and a pass scoped via `include_domains` to German insolvency aggregators (`insolvenzbekanntmachungen`, `verbraucherschutzforum`, `versteigerungskalender`, `insolvenzradar`, `infobroker`, `unternehmensregister`, `northdata`). The aggregator pass is essential from datacenter IPs, where Tavily throttles broad queries and would otherwise drop the proceeding source. Signals are attributed by **whole-word** company-name match within court-record proximity, so firms co-listed on multi-company insolvency pages don't false-positive. Sets `insolvenzverfahren` only.
 - *Amtlich tier* — when `hr_no` + `register_court` are supplied, a headless browser queries the official portal `insolvenzbekanntmachungen.de` by the exact register key (type + number + court — a unique key, no name ambiguity). An official publication sets `insolvenz=true`; the portal **never** clears the news `insolvenzverfahren` (so a fresh proceeding reported in news but not yet published officially still surfaces as "investigate").
 
-**Caveat:** this is a screening signal, not a legal record. The official `insolvenzbekanntmachungen.de` portal is not crawlable, so detection relies on third-party republishers — recall is strong but not guaranteed, and filings older than ~12 months may be missed. Always check `evidence[]` before acting. For authoritative status use a credit-register source.
+**Caveat:** this is a screening signal, not a legal record.
+- The amtlich tier queries the official portal directly, but only by exact Handelsregister key and only for **currently-published** filings. Preliminary measures (`Sicherungsmaßnahmen` / `vorläufiger Insolvenzverwalter`) are removed after a short retention, so an empty portal (`confirmed:true, insolvenz:false`) means *no current publication* — **not** "never insolvent". The UI reflects this as "Keine laufende Insolvenz im amtlichen Portal", not an all-clear.
+- The news tier relies on third-party republishers (the portal isn't bulk-crawlable) — recall is strong but not guaranteed, and filings older than ~12 months may be missed.
+
+Always check `evidence[]` before acting. For authoritative status use a credit-register source.
 
 ### 422 Unprocessable Entity — unreachable or empty site
 
