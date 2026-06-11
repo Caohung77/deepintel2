@@ -183,8 +183,10 @@ if not worker_alive():
         "Do NOT start with `streamlit run app.py` directly."
     )
 
-if submitted and not (url.strip() or company_name.strip() or hr_no.strip()):
-    st.warning("Bitte eine Firmen-URL, eine Handelsregister-Nr. **oder** einen Firmennamen angeben.")
+if submitted and not (url.strip() or company_name.strip()
+                      or (hr_no.strip() and register_court.strip())):
+    st.warning("Bitte eine Firmen-URL, einen Firmennamen **oder** eine Handelsregister-Nr. "
+               "**zusammen mit dem Registergericht** angeben.")
 elif submitted:
     if not worker_alive():
         st.error("Cannot submit job: worker is not running.")
@@ -700,4 +702,5 @@ elif report:
         )
 
 else:
-    st.info("Enter a company URL **or** a company name above and click **Run**.")
+    st.info("Enter a company URL, a company name, **or** a Handelsregister-Nr. "
+            "together with its Registergericht, then click **Run**.")
