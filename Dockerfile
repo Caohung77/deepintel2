@@ -20,6 +20,11 @@ RUN pip install --upgrade pip && \
 # Initialise crawl4ai DB and (re-)check Playwright browsers
 RUN python -c "import crawl4ai" && crawl4ai-setup || true
 
+# patchright (stealth fork) drives the official insolvency portal. It reuses the
+# Playwright Chromium already in this base image; this just verifies/links it.
+# Non-fatal: the portal check degrades gracefully ("browser unavailable") if absent.
+RUN patchright install chromium || true
+
 COPY app.py worker.py pipeline.py fast_extractor.py company_extractor.py /app/
 COPY enrichment /app/enrichment
 COPY synthesis  /app/synthesis

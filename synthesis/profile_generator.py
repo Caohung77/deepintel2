@@ -78,8 +78,12 @@ def build_data_block(report: Dict[str, Any]) -> str:
             for r in (tavily.get("risk_events") or [])[:6]
         ],
         "insolvency": {
+            # insolvenzverfahren = NEWS soft signal (reported, NOT amtlich → investigate).
+            # insolvenz = AMTLICH bestätigt by the official portal only. confirmed = portal queried.
             "insolvenzverfahren": (tavily.get("insolvency") or {}).get("insolvenzverfahren", False),
             "insolvenz": (tavily.get("insolvency") or {}).get("insolvenz", False),
+            "confirmed": (tavily.get("insolvency") or {}).get("confirmed", False),
+            "source": (tavily.get("insolvency") or {}).get("source"),
             # Tavily's free-text "answer" is intentionally omitted — it echoes the
             # dominant index narrative and can contradict the attributed booleans.
             "evidence": [

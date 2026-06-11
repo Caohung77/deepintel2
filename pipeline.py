@@ -109,7 +109,8 @@ async def run_full_pipeline(
             "competitor_snippets": [],
             "news": [],
             "risk_events": [],
-            "insolvency": {"insolvenzverfahren": False, "insolvenz": False, "answer": "", "evidence": []},
+            "insolvency": {"insolvenzverfahren": False, "insolvenz": False, "confirmed": False,
+                           "source": "tavily", "answer": "", "evidence": []},
         },
         "sanctions": [],
     }

@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.2.5"
+API_VERSION = "0.2.6"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "
@@ -216,10 +216,12 @@ def build_text_blocks(result: dict) -> list:
     ins = ((result.get("enrichment") or {}).get("tavily") or {}).get("insolvency") or {}
     if ins:
         B.append({"type": "heading", "text": "Insolvenz-Check"})
-        B.append({"type": "keyvalue", "label": "Insolvenzverfahren (laufend)",
+        B.append({"type": "keyvalue", "label": "Insolvenzverfahren (Verdacht, Nachrichten)",
                   "value": "JA" if ins.get("insolvenzverfahren") else "nein"})
-        B.append({"type": "keyvalue", "label": "Insolvent",
+        B.append({"type": "keyvalue", "label": "Insolvent (amtlich bestätigt)",
                   "value": "JA" if ins.get("insolvenz") else "nein"})
+        B.append({"type": "keyvalue", "label": "Amtlich geprüft (insolvenzbekanntmachungen.de)",
+                  "value": "JA" if ins.get("confirmed") else "nein"})
         reg_in = result.get("register_input") or {}
         if reg_in.get("hr_no"):
             B.append({"type": "keyvalue", "label": "Handelsregister", "value": reg_in["hr_no"]})
@@ -308,9 +310,11 @@ def build_text_blocks(result: dict) -> list:
         "the insolvency search and are echoed in `register_input`.\n\n"
         "**Response highlights**\n"
         "- `extracted` — facts (name, products `core_products_services`, etc.).\n"
-        "- `enrichment.tavily.insolvency` — German insolvency check: booleans "
-        "`insolvenzverfahren` (proceeding active) + `insolvenz` (already insolvent) "
-        "plus `evidence[]`.\n"
+        "- `enrichment.tavily.insolvency` — German insolvency check, two tiers by source: "
+        "`insolvenzverfahren` (NEWS soft signal — reported, not amtlich → investigate) + "
+        "`insolvenz` (AMTLICH bestätigt — set only by the official portal "
+        "insolvenzbekanntmachungen.de, needs `hr_no`+`register_court`), plus `confirmed` "
+        "(portal queried), `source`, and `evidence[]`.\n"
         "- `text` — ordered array of typed plain-text blocks "
         "(`title|subtitle|heading|paragraph|bullet|keyvalue|link`) for direct display.\n\n"
         "**Determinism:** extraction runs at `temperature=0`/`top_p=0` (Gemini, greedy — "
@@ -337,6 +341,8 @@ def build_text_blocks(result: dict) -> list:
                                 "insolvency": {
                                     "insolvenzverfahren": True,
                                     "insolvenz": False,
+                                    "confirmed": False,
+                                    "source": "tavily",
                                     "answer": "",
                                     "evidence": [{"title": "...", "url": "https://..."}],
                                 }
@@ -346,8 +352,9 @@ def build_text_blocks(result: dict) -> list:
                         "text": [
                             {"type": "title", "text": "Nill + Ritz CNC-Technik GmbH"},
                             {"type": "heading", "text": "Insolvenz-Check"},
-                            {"type": "keyvalue", "label": "Insolvenzverfahren (laufend)", "value": "JA"},
-                            {"type": "keyvalue", "label": "Insolvent", "value": "nein"},
+                            {"type": "keyvalue", "label": "Insolvenzverfahren (Verdacht, Nachrichten)", "value": "JA"},
+                            {"type": "keyvalue", "label": "Insolvent (amtlich bestätigt)", "value": "nein"},
+                            {"type": "keyvalue", "label": "Amtlich geprüft (insolvenzbekanntmachungen.de)", "value": "nein"},
                             {"type": "link", "label": "Beleg", "url": "https://..."},
                         ],
                         "metrics": {"total_ms": 22900},

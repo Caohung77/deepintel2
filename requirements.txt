@@ -1,4 +1,9 @@
 crawl4ai==0.8.6
+# Stealth Playwright fork — drives the JSF insolvency portal
+# (insolvenzbekanntmachungen.de) headless for authoritative checks. Reuses the
+# Chromium crawl4ai already installs; prod deploy must run `patchright install
+# chromium` if that browser isn't present.
+patchright==1.59.1
 pydantic==2.13.4
 streamlit==1.57.0
 rapidfuzz==3.14.5

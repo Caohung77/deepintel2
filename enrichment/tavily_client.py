@@ -223,8 +223,11 @@ def _attributable(rx: re.Pattern, text: str, name_pos: List[int]) -> bool:
 def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> dict:
     """Derive two booleans from company-attributable signals in the results.
 
-    insolvenzverfahren -> proceeding currently in process
-    insolvenz          -> company already insolvent / concluded / liquidated
+    insolvenzverfahren -> SOFT news signal: an insolvency is reported (proceeding,
+                          court Az, or even liquidation phrasing) but NOT officially
+                          confirmed -> "investigate".
+    insolvenz          -> always False here; "amtlich bestätigt" is set ONLY by the
+                          official portal override in tavily_enrich, never from news.
 
     Tavily's synthesised ``answer`` is NOT trusted for the booleans — it tends to
     echo whichever narrative dominates the index (e.g. an old acquisition) and
@@ -237,7 +240,6 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
     answer = (answer or "").strip()
     core = _core_tokens(company_name)
     verfahren = False
-    insolvent = False
     hits: List[dict] = []
 
     for it in items:
@@ -258,16 +260,17 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
         if _NEG_RX.search(text) and not (az or v or i):
             continue
 
-        if v or az:
-            verfahren = True
-        if i:
-            insolvent = True
+        # NEWS tier is SOFT only. Any insolvency signal — proceeding, court Az, or
+        # even "liquidiert"/"ist insolvent" — sets insolvenzverfahren ("investigate,
+        # reported but not officially confirmed"). `insolvenz` (amtlich bestätigt) is
+        # NEVER set from news; only the official portal can set it (in tavily_enrich).
         if v or az or i:
+            verfahren = True
             hits.append(it)
 
     return {
         "insolvenzverfahren": verfahren,
-        "insolvenz": insolvent,
+        "insolvenz": False,
         "answer": answer,
         "evidence": [
             {"title": it.get("title"), "url": it.get("url"), "snippet": it.get("snippet")}
@@ -335,6 +338,38 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None,
     news_items = _norm_results(news_raw)
     inso_items = _norm_results(inso_raw)
     insolvency = _classify_insolvency(company_name, inso_raw.get("answer", "") or "", inso_items)
+    insolvency["source"] = "tavily"
+    insolvency["confirmed"] = False
+
+    # Amtlich tier: the official portal indexes fresh filings web search misses (and
+    # avoids Tavily's twin-name false positives). An exact Handelsregister entry is a
+    # unique key. An official publication => `insolvenz` (amtlich bestätigt) = True.
+    # It must NEVER touch the news-derived `insolvenzverfahren` soft signal — in
+    # particular, a portal with NO entry must not clear a real news "investigate"
+    # flag (that would launder a false negative into "amtlich keine Insolvenz").
+    if hr_no and register_court:
+        try:
+            from enrichment.insolvency_portal import check_insolvency_portal
+            portal = await check_insolvency_portal(hr_no, register_court)
+        except Exception as e:  # noqa: BLE001 — portal must not break enrichment
+            print(f"[tavily] portal check failed: {e}")
+            portal = {"checked": False, "note": str(e)}
+        if portal.get("checked"):
+            insolvency["confirmed"] = True            # portal was actually queried
+            insolvency["portal_note"] = portal.get("note")
+            if portal.get("found"):
+                insolvency["insolvenz"] = True        # official publication exists
+                insolvency["source"] = portal["source"]   # portal determined the verdict
+                ann = portal.get("announcements") or []
+                if ann:
+                    insolvency["evidence"] = [
+                        {"title": f"{a.get('date')} · {a.get('az')} · {a.get('name')} ({a.get('register')})",
+                         "url": "https://www.insolvenzbekanntmachungen.de/",
+                         "snippet": f"Sitz: {a.get('sitz')} · Gericht: {a.get('court')}"}
+                        for a in ann[:5]
+                    ]
+        else:
+            insolvency["portal_note"] = portal.get("note")
 
     risk_events = []
     for it in risk_items:

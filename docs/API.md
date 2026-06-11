@@ -184,11 +184,13 @@ Use the structured JSON for machine processing, the `text` blocks for display.
       "competitor_snippets": [ { "title":"...", "url":"...", "snippet":"..." } ],
       "news": [ { "title":"...", "url":"...", "published_date":"2026-04-..." } ],
       "risk_events": [],
-      "insolvency": {                                // German insolvency check
-        "insolvenzverfahren": true,                  // proceeding currently active (vorläufig/eröffnet)
-        "insolvenz": false,                          // already insolvent / concluded / liquidated
+      "insolvency": {                                // German insolvency check (two tiers)
+        "insolvenzverfahren": true,                  // NEWS soft signal — insolvency reported, NOT amtlich → investigate
+        "insolvenz": false,                          // AMTLICH bestätigt — set only by official portal (insolvenzbekanntmachungen.de)
+        "confirmed": false,                          // true once the official portal was actually queried (needs hr_no+register_court)
+        "source": "tavily",                          // "tavily" (news) | "insolvenzbekanntmachungen.de" (amtlich)
         "answer": "Tavily's free-text summary",      // returned, but NOT used for the booleans (may contradict them)
-        "evidence": [ { "title":"...", "url":"..." } ]// supporting sources (court Bekanntmachung, registers)
+        "evidence": [ { "title":"...", "url":"..." } ]// supporting sources (official Bekanntmachung when amtlich, else news)
       }
     },
     "sanctions": []                                  // hits if name on OpenSanctions
@@ -235,19 +237,26 @@ Returned inside the standard `POST /api/analyze` response (no separate endpoint)
 
 **Disambiguation:** supply request fields `hr_no` (Handelsregister number) and `register_court` (Amtsgericht) to pin the search to the exact entity — they are woven into the insolvency query (`Ist die Firma "X" (HRA 12345, Amtsgericht Stuttgart) insolvent?`). Recommended when the company name is common across multiple cities. Echoed back in `register_input` + the Insolvenz-Check `text` blocks.
 
+Two independent tiers by **source** (not by proceeding stage): a soft NEWS signal and a hard AMTLICH confirmation.
+
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `insolvenzverfahren` | bool | An insolvency **proceeding is currently active** — preliminary or opened (`vorläufiger Insolvenzverwalter`, `Insolvenzverfahren eröffnet`, `Sicherungsmaßnahmen`, court `Az. n IN n/yy`). |
-| `insolvenz` | bool | Company is **already insolvent / proceeding concluded / liquidated** (`ist insolvent`, `zahlungsunfähig`, `liquidiert`, `aufgelöst`). |
+| `insolvenzverfahren` | bool | **NEWS soft signal** — an insolvency is *reported* (`vorläufiger Insolvenzverwalter`, `Insolvenzverfahren eröffnet`, `Sicherungsmaßnahmen`, court `Az. n IN n/yy`, even `liquidiert`/`ist insolvent`) but **not officially confirmed**. Means "investigate". Derived from Tavily news only; the official portal never sets or clears it. |
+| `insolvenz` | bool | **Amtlich bestätigt** — an official insolvency publication exists in `insolvenzbekanntmachungen.de` for the supplied Handelsregister entry. Set **only** by the portal; never derived from news. Requires `hr_no` + `register_court`. |
+| `confirmed` | bool | `true` once the official portal was actually queried (any outcome). `false` = portal not reached (no register entry supplied / browser unavailable) → trust only the news `insolvenzverfahren`. |
+| `source` | string | `"tavily"` (news heuristic) or `"insolvenzbekanntmachungen.de"` (official portal). |
 | `answer` | string | Tavily's free-text summary of the insolvency question. Returned for context but **not** used to derive the booleans — it can contradict them (it echoes the dominant search narrative), so rely on the booleans + `evidence`, not this. |
-| `evidence` | array | Up to 3 supporting sources `{title, url}` (court Bekanntmachungen, registers, news) for human verification. |
+| `evidence` | array | Up to 5 supporting sources `{title, url}` — the official Bekanntmachung when amtlich, otherwise news/registers — for human verification. |
 
 Typical states:
-- Healthy: `{"insolvenzverfahren": false, "insolvenz": false}`
-- In proceeding: `{"insolvenzverfahren": true, "insolvenz": false}`
-- Already insolvent / wound up: `{"insolvenzverfahren": true, "insolvenz": true}`
+- Healthy, portal checked: `{"insolvenzverfahren": false, "insolvenz": false, "confirmed": true}` — official portal queried, no entry.
+- Reported in news, not amtlich (**investigate**): `{"insolvenzverfahren": true, "insolvenz": false, "confirmed": false}`
+- Amtlich insolvent: `{"insolvenz": true, "confirmed": true, "source": "insolvenzbekanntmachungen.de"}`
+- News reports a proceeding but the portal has no entry yet (**still investigate — do NOT treat as clear**): `{"insolvenzverfahren": true, "insolvenz": false, "confirmed": true}`
 
-**How it works:** a Tavily search (`search_depth=advanced`, `time_range=year`) asks whether the company is insolvent; signals are attributed to the queried company by court-record proximity, so other firms co-listed on multi-company insolvency pages do not produce false positives.
+**How it works:**
+- *News tier* — a Tavily search (`search_depth=advanced`, `time_range=year`) asks whether the company is insolvent; signals are attributed to the queried company by court-record proximity, so firms co-listed on multi-company insolvency pages don't false-positive. Sets `insolvenzverfahren` only.
+- *Amtlich tier* — when `hr_no` + `register_court` are supplied, a headless browser queries the official portal `insolvenzbekanntmachungen.de` by the exact register key (type + number + court — a unique key, no name ambiguity). An official publication sets `insolvenz=true`; the portal **never** clears the news `insolvenzverfahren` (so a fresh proceeding reported in news but not yet published officially still surfaces as "investigate").
 
 **Caveat:** this is a screening signal, not a legal record. The official `insolvenzbekanntmachungen.de` portal is not crawlable, so detection relies on third-party republishers — recall is strong but not guaranteed, and filings older than ~12 months may be missed. Always check `evidence[]` before acting. For authoritative status use a credit-register source.
 

@@ -24,3 +24,4 @@ report_*.json
 
 # Claude / agent local state
 .claude/
+.playwright-mcp/

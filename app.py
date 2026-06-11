@@ -243,6 +243,8 @@ def _render_insolvency(tavily: dict, register_input: dict | None = None) -> None
     verfahren = ins.get("insolvenzverfahren")
     insolvent = ins.get("insolvenz")
     evidence = ins.get("evidence") or []
+    confirmed = ins.get("confirmed")          # amtlich via insolvenzbekanntmachungen.de
+    source = ins.get("source")
 
     reg = register_input or {}
     reg_bits = [b for b in (reg.get("hr_no"), reg.get("register_court")) if b]
@@ -251,18 +253,26 @@ def _render_insolvency(tavily: dict, register_input: dict | None = None) -> None
 
     # Loud full-width banner — this is high-stakes risk info.
     if insolvent:
-        st.error("## 🔴 INSOLVENT — Unternehmen insolvent / Verfahren abgeschlossen")
+        st.error("## 🔴 INSOLVENT — amtlich bestätigt (insolvenzbekanntmachungen.de)")
     elif verfahren:
-        st.error("## 🔴 INSOLVENZVERFAHREN LÄUFT — vorläufig/eröffnet")
+        st.warning("## 🟡 INSOLVENZVERFAHREN möglich — laut Nachrichten, NICHT amtlich "
+                   "bestätigt. Bitte prüfen.")
+    elif confirmed:
+        st.success("## 🟢 Keine laufende Insolvenz im amtlichen Portal — keine aktuelle "
+                   "Veröffentlichung (abgeschlossene Verfahren werden nach Frist gelöscht)")
     else:
-        st.success("## 🟢 Keine Insolvenzhinweise gefunden")
+        st.warning("## ⚠️ Keine Hinweise via Websuche — NICHT amtlich bestätigt. "
+                   "Bitte insolvenzbekanntmachungen.de prüfen.")
+
+    if confirmed:
+        st.caption("✅ Quelle: amtliches Insolvenzportal (insolvenzbekanntmachungen.de)")
 
     with st.container(border=True):
         cols = st.columns(2)
         with cols[0]:
-            st.metric("Insolvenzverfahren", "🔴 Ja (laufend)" if verfahren else "🟢 Nein")
+            st.metric("Insolvenzverfahren", "🟡 Verdacht (Nachrichten)" if verfahren else "🟢 Nein")
         with cols[1]:
-            st.metric("Insolvent", "🔴 Ja" if insolvent else "🟢 Nein")
+            st.metric("Insolvent", "🔴 Ja (amtlich)" if insolvent else "🟢 Nein")
 
         if evidence:
             with st.expander(f"⚖️ Belege ({len(evidence)})"):
