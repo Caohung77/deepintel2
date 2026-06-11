@@ -241,6 +241,7 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
     core = _core_tokens(company_name)
     verfahren = False
     hits: List[dict] = []
+    named_hits: List[dict] = []
 
     for it in items:
         text = f"{it.get('title','')} {it.get('snippet','')}"
@@ -267,14 +268,25 @@ def _classify_insolvency(company_name: str, answer: str, items: List[dict]) -> d
         if v or az or i:
             verfahren = True
             hits.append(it)
+        else:
+            # Supplemental evidence: a result whose TITLE clearly names the company is
+            # surfaced as a Beleg even when Tavily's snippet is too thin to carry a
+            # signal (e.g. an insolvency-listing page that returns only nav chrome).
+            # These come from the insolvency-specific queries, so they are insolvency
+            # context. They enrich the evidence list ONLY — they never set the boolean.
+            title_low = (it.get("title") or "").lower()
+            if sum(1 for t in core if t in title_low) >= min(2, len(core)):
+                named_hits.append(it)
 
+    hit_urls = {h.get("url") for h in hits}
+    ev = hits + [n for n in named_hits if n.get("url") not in hit_urls]
     return {
         "insolvenzverfahren": verfahren,
         "insolvenz": False,
         "answer": answer,
         "evidence": [
             {"title": it.get("title"), "url": it.get("url"), "snippet": it.get("snippet")}
-            for it in (hits or items)[:5]
+            for it in (ev or items)[:5]
         ],
     }
 
@@ -311,19 +323,22 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None,
         comp_q = f'"{company_name}" competitors OR Wettbewerber OR alternatives'
         risk_q = f'"{company_name}" ({RISK_KEYWORDS})'
         news_q = f'"{company_name}"'
-        # Handelsregister hint sharpens disambiguation (same company name, different cities).
-        reg_bits = []
-        if hr_no:
-            reg_bits.append(hr_no.strip())
-        if register_court:
-            reg_bits.append(f"Amtsgericht {register_court.strip()}")
-        reg_hint = f" ({', '.join(reg_bits)})" if reg_bits else ""
-        inso_q = (
-            f'Ist die Firma "{company_name}"{reg_hint} insolvent? '
-            f'Gibt es ein Insolvenzverfahren gegen "{company_name}"{reg_hint}?'
+        # Insolvency search — keyword-first with the EXACT quoted company name, the way a
+        # Google query surfaces the actual Bekanntmachung (verbose NL questions diluted it
+        # to generic insolvency listicles). The Handelsregister NUMBER pins identity for
+        # co-named firms. We deliberately OMIT the register court: the insolvency court
+        # differs from the register court (e.g. registered AG Stuttgart, proceeding AG
+        # Ludwigsburg), so forcing "Amtsgericht <Registergericht>" biases against the real
+        # filing. Two passes merged for recall: the bare proceeding term, and the
+        # proceeding-specific markers (Insolvenzverwalter / Antrag / eröffnet / Az).
+        inso_id = f' ({hr_no.strip()})' if hr_no else ""
+        inso_q = f'insolvenzverfahren insolvenz "{company_name}"{inso_id}'
+        inso_q2 = (
+            f'"{company_name}"{inso_id} insolvenzverwalter OR insolvenzantrag '
+            f'OR "Insolvenzverfahren eröffnet" OR Aktenzeichen'
         )
 
-        comp_raw, risk_raw, news_raw, inso_raw = await asyncio.gather(
+        comp_raw, risk_raw, news_raw, inso_raw, inso_raw2 = await asyncio.gather(
             _tavily_search(cx, comp_q, api_key, exclude_domains=exclude, max_results=8),
             _tavily_search(cx, risk_q, api_key, exclude_domains=exclude, max_results=10),
             _tavily_search(cx, news_q, api_key, topic="news", days=90, max_results=10),
@@ -331,12 +346,22 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None,
                 cx, inso_q, api_key, max_results=10,
                 include_answer=True, search_depth="advanced", time_range="year",
             ),
+            _tavily_search(
+                cx, inso_q2, api_key, max_results=10,
+                search_depth="advanced", time_range="year",
+            ),
         )
 
     comp_items = _norm_results(comp_raw)
     risk_items = _norm_results(risk_raw)
     news_items = _norm_results(news_raw)
+    # Merge both insolvency passes, dedupe by URL (preserve order: targeted pass first).
     inso_items = _norm_results(inso_raw)
+    _seen = {it.get("url") for it in inso_items}
+    for it in _norm_results(inso_raw2):
+        if it.get("url") not in _seen:
+            inso_items.append(it)
+            _seen.add(it.get("url"))
     insolvency = _classify_insolvency(company_name, inso_raw.get("answer", "") or "", inso_items)
     insolvency["source"] = "tavily"
     insolvency["confirmed"] = False
