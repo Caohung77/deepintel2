@@ -83,11 +83,12 @@ async def _tavily_search(
     days: Optional[int] = None,
     max_results: int = 8,
     exclude_domains: Optional[List[str]] = None,
+    include_domains: Optional[List[str]] = None,
     include_answer: bool = False,
     search_depth: str = "basic",
     time_range: Optional[str] = None,
 ) -> dict:
-    cache_key = f"{topic}_{query}_{days}_{int(include_answer)}_{search_depth}_{time_range}"
+    cache_key = f"{topic}_{query}_{days}_{int(include_answer)}_{search_depth}_{time_range}_{','.join(include_domains or [])}"
     cached = _load_cache(cache_key)
     if cached:
         return cached
@@ -106,6 +107,8 @@ async def _tavily_search(
         payload["days"] = days
     if exclude_domains:
         payload["exclude_domains"] = exclude_domains
+    if include_domains:
+        payload["include_domains"] = include_domains
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
@@ -142,6 +145,14 @@ def _tag_risk(item: dict) -> Optional[str]:
 
 
 # --- Insolvency signal patterns (lead structural, gate bare "insolvent" hardest) ---
+
+# German insolvency aggregators that republish court filings. Used as include_domains
+# for a recall pass that survives datacenter-IP throttling (see tavily_enrich).
+_INSOLVENCY_DOMAINS = [
+    "insolvenzbekanntmachungen.de", "verbraucherschutzforum.berlin",
+    "versteigerungskalender.de", "insolvenzradar.de", "infobroker.de",
+    "unternehmensregister.de", "northdata.de",
+]
 
 # Court file number, e.g. "2 IN 277/26" — highest-precision proceeding marker.
 _COURT_AZ_RX = re.compile(r"\b\d+\s*IN\s*\d+\s*/\s*\d+\b", re.I)
@@ -347,8 +358,14 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None,
             f'"{company_name}"{inso_id} insolvenzverwalter OR insolvenzantrag '
             f'OR "Insolvenzverfahren eröffnet" OR Aktenzeichen'
         )
+        # Third pass restricted to German insolvency aggregators that republish court
+        # filings. Critical for RECALL from datacenter IPs: Tavily throttles broad
+        # queries from server IPs (prod returned 2 results where a residential IP got
+        # 5 and missed the Az source), but a domain-scoped query still surfaces the
+        # aggregator pages. This is the IP-robust path to the proceeding evidence.
+        inso_q3 = f'insolvenz insolvenzverfahren "{company_name}"'
 
-        comp_raw, risk_raw, news_raw, inso_raw, inso_raw2 = await asyncio.gather(
+        comp_raw, risk_raw, news_raw, inso_raw, inso_raw2, inso_raw3 = await asyncio.gather(
             _tavily_search(cx, comp_q, api_key, exclude_domains=exclude, max_results=8),
             _tavily_search(cx, risk_q, api_key, exclude_domains=exclude, max_results=10),
             _tavily_search(cx, news_q, api_key, topic="news", days=90, max_results=10),
@@ -360,15 +377,20 @@ async def tavily_enrich(company_name: str, own_domain: Optional[str] = None,
                 cx, inso_q2, api_key, max_results=10,
                 search_depth="advanced", time_range="year",
             ),
+            _tavily_search(
+                cx, inso_q3, api_key, max_results=10,
+                include_domains=_INSOLVENCY_DOMAINS, search_depth="advanced", time_range="year",
+            ),
         )
 
     comp_items = _norm_results(comp_raw)
     risk_items = _norm_results(risk_raw)
     news_items = _norm_results(news_raw)
-    # Merge both insolvency passes, dedupe by URL (preserve order: targeted pass first).
+    # Merge all insolvency passes, dedupe by URL (preserve order: targeted pass first,
+    # then proceeding-markers, then the aggregator-domain recall pass).
     inso_items = _norm_results(inso_raw)
     _seen = {it.get("url") for it in inso_items}
-    for it in _norm_results(inso_raw2):
+    for it in _norm_results(inso_raw2) + _norm_results(inso_raw3):
         if it.get("url") not in _seen:
             inso_items.append(it)
             _seen.add(it.get("url"))
