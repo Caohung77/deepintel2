@@ -231,6 +231,19 @@ Use the structured JSON for machine processing, the `text` blocks for display.
 }
 ```
 
+### Branch outlook (`branch`)
+
+Returned inside the standard `POST /api/analyze` response when `options.with_branch = true` (the default). There is no separate DeepIntel endpoint for this block; the service classifies the company into a SectorBench branch and attaches the score, raw news context, and German outlook text.
+
+| UI label / content | Response field |
+| --- | --- |
+| Composite Score | `branch.branch_score.composite_score` |
+| Rang / Rank | `branch.branch_score.rank` |
+| Risk Level | `branch.branch_score.risk_level` |
+| Confidence | `branch.branch_score.confidence` |
+| Branchen-Ausblick + Auswirkung text | `branch.outlook_markdown` |
+| SectorBench raw context | `branch.branch_news` and `branch.branch_score.dimensions` |
+
 ### Insolvency check (`enrichment.tavily.insolvency`)
 
 Returned inside the standard `POST /api/analyze` response (no separate endpoint). Requires `options.with_enrichment = true` (the default); with enrichment disabled the booleans stay `false` and `evidence` is empty.

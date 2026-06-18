@@ -315,6 +315,10 @@ def build_text_blocks(result: dict) -> list:
         "`insolvenz` (AMTLICH bestätigt — set only by the official portal "
         "insolvenzbekanntmachungen.de, needs `hr_no`+`register_court`), plus `confirmed` "
         "(portal queried), `source`, and `evidence[]`.\n"
+        "- `branch` — SectorBench classification and outlook. Screenshot metrics map to "
+        "`branch.branch_score.composite_score`, `branch.branch_score.rank`, "
+        "`branch.branch_score.risk_level`, `branch.branch_score.confidence`, and the "
+        "German summary text in `branch.outlook_markdown`.\n"
         "- `text` — ordered array of typed plain-text blocks "
         "(`title|subtitle|heading|paragraph|bullet|keyvalue|link`) for direct display.\n\n"
         "**Determinism:** extraction runs at `temperature=0`/`top_p=0` (Gemini, greedy — "
@@ -349,6 +353,29 @@ def build_text_blocks(result: dict) -> list:
                             },
                             "sanctions": [],
                         },
+                        "branch": {
+                            "branch_key": "manufacturing",
+                            "branch_name_de": "Verarbeitendes Gewerbe",
+                            "branch_name_en": "Manufacturing (General)",
+                            "branch_score": {
+                                "composite_score": 54.4,
+                                "rank": 4,
+                                "risk_level": "medium",
+                                "confidence": "high",
+                                "dimensions": {
+                                    "financial_health": 52.3,
+                                    "market_dynamics": 42.9,
+                                },
+                            },
+                            "branch_news": {
+                                "executive_overview": "...",
+                                "key_developments": [],
+                            },
+                            "outlook_markdown": (
+                                "**BRANCHEN-AUSBLICK** Das verarbeitende Gewerbe zeigt ...\n\n"
+                                "**AUSWIRKUNG AUF Nill + Ritz CNC-Technik GmbH** Externe Risiken ..."
+                            ),
+                        },
                         "text": [
                             {"type": "title", "text": "Nill + Ritz CNC-Technik GmbH"},
                             {"type": "heading", "text": "Insolvenz-Check"},
@@ -356,6 +383,9 @@ def build_text_blocks(result: dict) -> list:
                             {"type": "keyvalue", "label": "Insolvent (amtlich bestätigt)", "value": "nein"},
                             {"type": "keyvalue", "label": "Amtlich geprüft (insolvenzbekanntmachungen.de)", "value": "nein"},
                             {"type": "link", "label": "Beleg", "url": "https://..."},
+                            {"type": "heading", "text": "Branche & Ausblick - Verarbeitendes Gewerbe"},
+                            {"type": "paragraph", "text": "BRANCHEN-AUSBLICK Das verarbeitende Gewerbe zeigt ..."},
+                            {"type": "paragraph", "text": "AUSWIRKUNG AUF Nill + Ritz CNC-Technik GmbH Externe Risiken ..."},
                         ],
                         "metrics": {"total_ms": 22900},
                     }
