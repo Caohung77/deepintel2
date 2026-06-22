@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.2.10"
+API_VERSION = "0.2.11"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "

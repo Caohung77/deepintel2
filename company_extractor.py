@@ -132,6 +132,80 @@ def _domain(url: str) -> str:
     return urlparse(url).netloc.lower()
 
 
+# ---------- Stealth fallback (bot-protected sites) --------------------------
+# crawl4ai uses vanilla Playwright and gets blocked by PerimeterX/DataDome
+# (e.g. Trustpilot). patchright is a stealth Playwright fork that already ships
+# in this project for the insolvency portal. When a normal crawl4ai fetch comes
+# back as a challenge/block page, we re-fetch the rendered HTML with patchright
+# and feed it back into crawl4ai via the `raw://` scheme so the existing LLM
+# extraction runs unchanged.
+
+_STEALTH_MIN_HTML = 2000  # block pages are ~1KB; real pages are far larger
+_BLOCK_MARKERS = (
+    "just a moment", "captcha-delivery", "access denied", "px-captcha",
+    "datadome", "cf-chl", "/cdn-cgi/challenge", "request unsuccessful",
+)
+# Per-URL cache so discovery + extraction don't re-launch a browser per page.
+_STEALTH_HTML_CACHE: dict[str, str] = {}
+
+
+def _looks_blocked(html: Optional[str], success: bool) -> bool:
+    """A crawl4ai result is 'blocked' if it failed, is tiny, or shows a challenge."""
+    if not success:
+        return True
+    if not html or len(html) < _STEALTH_MIN_HTML:
+        return True
+    low = html[:6000].lower()
+    return any(m in low for m in _BLOCK_MARKERS)
+
+
+async def _stealth_html(url: str, timeout_ms: int = 45000) -> Optional[str]:
+    """Fetch fully-rendered HTML with patchright (stealth). Cached per URL."""
+    if url in _STEALTH_HTML_CACHE:
+        return _STEALTH_HTML_CACHE[url]
+    try:
+        from patchright.async_api import async_playwright
+    except ImportError:
+        return None
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await page.wait_for_timeout(3000)  # let JS-rendered content settle
+                html = await page.content()
+            finally:
+                await browser.close()
+    except Exception:  # noqa: BLE001 — stealth is best-effort; never crash the crawl
+        return None
+    if html and len(html) >= _STEALTH_MIN_HTML:
+        _STEALTH_HTML_CACHE[url] = html
+        return html
+    return None
+
+
+_HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.I)
+
+
+def _extract_links(html: str, base_url: str, domain: str) -> List[str]:
+    """Extract same-domain absolute links from raw HTML, deduped, order-stable."""
+    from urllib.parse import urljoin
+
+    seen: set[str] = set()
+    out: List[str] = []
+    for raw in _HREF_RE.findall(html):
+        if raw.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        full = urljoin(base_url, raw).split("#", 1)[0]
+        if _domain(full) != domain:
+            continue
+        if full not in seen:
+            seen.add(full)
+            out.append(full)
+    return out
+
+
 async def discover_pages(start_url: str, max_pages: int = 60, max_depth: int = 2) -> dict:
     """BFS-crawl on same domain, classify URLs by hint regex."""
     domain = _domain(start_url)
@@ -151,15 +225,9 @@ async def discover_pages(start_url: str, max_pages: int = 60, max_depth: int = 2
     buckets = {"impressum": [], "about": [], "products": [], "governance": [], "other": []}
     subpages = []
 
-    for r in results:
-        if not r.success:
-            continue
-        url = r.url
-        title = (r.metadata or {}).get("title") if hasattr(r, "metadata") else None
-        subpages.append({"url": url, "title": title})
-
+    def _bucket(url: str) -> None:
         if SKIP_HINTS.search(url):
-            continue
+            return
         if IMPRESSUM_HINTS.search(url):
             buckets["impressum"].append(url)
         elif GOVERNANCE_HINTS.search(url):
@@ -170,6 +238,27 @@ async def discover_pages(start_url: str, max_pages: int = 60, max_depth: int = 2
             buckets["products"].append(url)
         else:
             buckets["other"].append(url)
+
+    got_content = False
+    for r in results:
+        if not r.success:
+            continue
+        if not _looks_blocked(r.html, r.success):
+            got_content = True
+        url = r.url
+        title = (r.metadata or {}).get("title") if hasattr(r, "metadata") else None
+        subpages.append({"url": url, "title": title})
+        _bucket(url)
+
+    # Bot-protected site: BFS got only block pages. Fall back to a stealth
+    # homepage fetch and bucket its depth-1 same-domain links. (Depth-2
+    # discovery is lost, but Impressum/nav/footer links live at depth-1.)
+    if not got_content:
+        html = await _stealth_html(start_url)
+        if html:
+            subpages.append({"url": start_url, "title": None})
+            for link in _extract_links(html, start_url, domain):
+                _bucket(link)
 
     buckets["subpages"] = subpages
     return buckets
@@ -242,6 +331,19 @@ async def _extract_one(crawler: AsyncWebCrawler, url: str, schema: type[BaseMode
         delay_before_return_html=1.5,  # allow cookie dismissal + lazy content to settle
     )
     r = await crawler.arun(url=url, config=cfg)
+
+    # Bot-protected page: crawl4ai got a challenge/block page. Re-fetch the real
+    # HTML with patchright (stealth) and run the SAME LLM extraction on it via
+    # the raw:// scheme. Handles mixed protection (some pages 200, some 403).
+    if _looks_blocked(getattr(r, "html", None), r.success):
+        html = await _stealth_html(url)
+        if html:
+            raw_cfg = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                extraction_strategy=_llm_strategy(schema, instruction),
+            )
+            r = await crawler.arun(url="raw://" + html, config=raw_cfg)
+
     if not r.success or not r.extracted_content:
         return None
     try:
