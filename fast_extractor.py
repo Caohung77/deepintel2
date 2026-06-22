@@ -343,6 +343,70 @@ IMPRESSUM_SYSTEM = (
 )
 
 
+_IMPRESSUM_HR_RX = re.compile(r"\b(HRA|HRB|GnR|GsR|PR|VR)\s*\.?\s*(\d+)\b", re.I)
+_IMPRESSUM_COURT_RX = re.compile(
+    r"\b(?:amtsgericht|registergericht)\s*[:\-]?\s*([A-ZÄÖÜ][A-Za-zÄÖÜäöüß .\-]{1,50})",
+    re.I,
+)
+
+
+def _extract_register_from_impressum_text(text: str) -> dict:
+    """Deterministic fallback for HRB/HRA + Amtsgericht from Impressum text."""
+    out: dict = {}
+    if not text:
+        return out
+    m_hr = _IMPRESSUM_HR_RX.search(text)
+    if m_hr:
+        out["register_number"] = f"{m_hr.group(1).upper()} {m_hr.group(2)}"
+    for line in text.splitlines():
+        m_court = _IMPRESSUM_COURT_RX.search(line)
+        if not m_court:
+            continue
+        court = re.split(r"[,;|/]", m_court.group(1), maxsplit=1)[0].strip(" .:-")
+        if court:
+            out["register_court"] = court
+            break
+    if "register_court" not in out:
+        m_court = _IMPRESSUM_COURT_RX.search(text[:4000])
+        if m_court:
+            court = re.split(r"[,;|/\n\r]", m_court.group(1), maxsplit=1)[0].strip(" .:-")
+            if court:
+                out["register_court"] = court
+    return out
+
+
+def _merge_register_fallback(impressum_data: Optional[dict], impressum_text: str) -> Optional[dict]:
+    detected = _extract_register_from_impressum_text(impressum_text)
+    if not detected:
+        return impressum_data
+    imp = dict(impressum_data or {})
+    for key in ("register_number", "register_court"):
+        if not (imp.get(key) or "").strip() and detected.get(key):
+            imp[key] = detected[key]
+    return imp
+
+
+def _effective_register_input(
+    hr_no: Optional[str],
+    register_court: Optional[str],
+    impressum_data: Optional[dict],
+    *,
+    prefer_impressum: bool = False,
+) -> dict:
+    imp = impressum_data or {}
+    user_hr = (hr_no or "").strip()
+    user_court = (register_court or "").strip()
+    imp_hr = (imp.get("register_number") or "").strip()
+    imp_court = (imp.get("register_court") or "").strip()
+    if prefer_impressum:
+        eff_hr = imp_hr or user_hr
+        eff_court = imp_court or user_court
+    else:
+        eff_hr = user_hr or imp_hr
+        eff_court = user_court or imp_court
+    return {"hr_no": eff_hr or None, "register_court": eff_court or None}
+
+
 async def llm_extract_impressum(impressum_text: str, source_url: str) -> Optional[dict]:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
@@ -489,10 +553,10 @@ async def fast_extract(url: str, *, with_profile: bool = True,
     import time
     t0 = time.time()
     name_override = (company_name or "").strip() or None
-    identity_match = None   # set when we discover + verify a site for a name-only request
+    identity_match = None
 
     # No website supplied → resolve what to do from the available identifiers.
-    # Priority: URL (handled below) > Handelsregister-Nr. (discover+verify) > name (search only).
+    # Priority: URL (handled below) > Handelsregister-Nr. (resolve name) > name.
     if not (url or "").strip():
         has_hr = bool((hr_no or "").strip())
         if not name_override and not has_hr:
@@ -598,33 +662,31 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         imp_text = html_to_text(imp_html, max_chars=15000)
         t_imp = time.time()
         impressum_data = await llm_extract_impressum(imp_text, imp_url or url)
+        impressum_data = _merge_register_fallback(impressum_data, imp_text)
         imp_llm_ms = (time.time() - t_imp) * 1000
 
     # Fact-check supplied Handelsregister data against the crawled Impressum.
-    # identity_match is already set for a discovered URL (verified upstream); only a
-    # caller-supplied URL needs checking here. A contradiction → refuse before enrichment.
+    # URL-backed analysis should not fail solely because caller-supplied register
+    # fields differ from the site's Impressum; keep the diagnostic and trust the
+    # Impressum register for downstream enrichment instead.
     if identity_match is None and ((hr_no or "").strip() or (register_court or "").strip()):
         from enrichment.company_finder import _verify
         identity_match = _verify(hr_no, register_court, impressum_data)
-        if identity_match.get("verified") is False:
-            return {
-                "source_url": url,
-                "error": ("Supplied Handelsregister number / register court do not match the "
-                          "website's Impressum (no match) — the site likely belongs to a "
-                          "different company."),
-                "error_kind": "identity_mismatch",
-                "identity_match": identity_match,
-                "register_input": {"hr_no": hr_no, "register_court": register_court},
-                "impressum": {"url": imp_url, "data": impressum_data} if imp_url else None,
-                "metrics": {"total_ms": round((time.time() - t0) * 1000)},
-            }
+
+    effective_register = _effective_register_input(
+        hr_no,
+        register_court,
+        impressum_data,
+        prefer_impressum=(identity_match or {}).get("verified") is False,
+    )
+    effective_hr_no = effective_register.get("hr_no")
+    effective_register_court = effective_register.get("register_court")
 
     extract_total_ms = (time.time() - t0) * 1000
 
     result = {
         "source_url": url,
-        "register_input": {"hr_no": hr_no, "register_court": register_court}
-                          if (hr_no or register_court) else None,
+        "register_input": effective_register if (effective_hr_no or effective_register_court) else None,
         "extracted": data or {},
         "impressum": {
             "url": imp_url,
@@ -649,7 +711,7 @@ async def fast_extract(url: str, *, with_profile: bool = True,
 
     # ---- Enrichment + synthesis (optional) ----
     if with_enrichment or with_profile:
-        company_name = name_override or (data or {}).get("name") or (impressum_data or {}).get("company_name") or url
+        company_name = name_override or (impressum_data or {}).get("company_name") or (data or {}).get("name") or url
         persons = (impressum_data or {}).get("represented_by") or []
         if isinstance(persons, str):
             persons = [persons]
@@ -665,7 +727,8 @@ async def fast_extract(url: str, *, with_profile: bool = True,
                 from enrichment.sanctions import check_sanctions
                 tavily_task = asyncio.create_task(
                     tavily_enrich(company_name, own_domain=url,
-                                  hr_no=hr_no, register_court=register_court)
+                                  hr_no=effective_hr_no,
+                                  register_court=effective_register_court)
                 )
                 sanctions_task = asyncio.create_task(check_sanctions(company_name, persons))
             except ImportError as e:
@@ -701,7 +764,7 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         try:
             from synthesis.branch_generator import analyze_branch
             branch_t0 = time.time()
-            company_name = name_override or (data or {}).get("name") or ((impressum_data or {}).get("company_name")) or ""
+            company_name = name_override or ((impressum_data or {}).get("company_name")) or (data or {}).get("name") or ""
             result["branch"] = await analyze_branch(data or {}, company_name=company_name)
             result["metrics"]["branch_ms"] = round((time.time() - branch_t0) * 1000)
         except Exception as e:  # noqa: BLE001

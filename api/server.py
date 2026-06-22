@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.2.9"
+API_VERSION = "0.2.10"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "
@@ -91,7 +91,7 @@ class AnalyzeRequest(BaseModel):
         default=None,
         description="Company domain or full URL. Examples: 'siemens.com', 'https://www.siemens.com/'. "
                     "Primary input (safest). When given with 'hr_no'/'register_court', the "
-                    "crawled Impressum is fact-checked against them (mismatch → 422). Optional — "
+                    "crawled Impressum is compared against them and reported as metadata. Optional — "
                     "if omitted, the request becomes a name/HR-based insolvency + enrichment "
                     "check (no website crawl).",
         examples=["siemens.com", "https://www.boniforce.de"],
@@ -226,7 +226,7 @@ def build_text_blocks(result: dict) -> list:
         if reg_in.get("hr_no"):
             B.append({"type": "keyvalue", "label": "Handelsregister", "value": reg_in["hr_no"]})
         if reg_in.get("register_court"):
-            B.append({"type": "keyvalue", "label": "Registergericht (Eingabe)", "value": reg_in["register_court"]})
+            B.append({"type": "keyvalue", "label": "Registergericht", "value": reg_in["register_court"]})
         for ev in (ins.get("evidence") or [])[:3]:
             if ev.get("url"):
                 B.append({"type": "link", "label": ev.get("title") or "Beleg", "url": ev["url"]})
@@ -303,8 +303,9 @@ def build_text_blocks(result: dict) -> list:
         "check, SectorBench branch outlook, and a German B2B-Entscheider-Profil.\n\n"
         "**Identity check** — pass `hr_no` (Handelsregister number, e.g. 'HRA 12345') "
         "and `register_court` (Amtsgericht / register city, e.g. 'Stuttgart'). With a "
-        "`domain`, the crawled Impressum is fact-checked against them — a contradiction "
-        "returns **422 `identity_mismatch`** (the site belongs to a different company). "
+        "`domain`, the crawled Impressum is compared against them and returned as "
+        "`identity_match` metadata; a mismatch no longer blocks the analysis, and the "
+        "site's Impressum register is used for downstream enrichment when available. "
         "Without a `domain`, the request runs an insolvency + enrichment check on the "
         "company (name resolved from the register if needed); both values also sharpen "
         "the insolvency search and are echoed in `register_input`.\n\n"

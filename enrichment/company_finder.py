@@ -2,8 +2,8 @@
 
 Two uses:
   - `_verify(hr_no, register_court, impressum)` — fact-check a crawled Impressum's
-    register number + court against caller-supplied values (used on the URL path to
-    reject a site that belongs to a different company).
+    register number + court against caller-supplied values (used on the URL path as
+    non-fatal diagnostic metadata).
   - `_resolve_name(hr_no, register_court)` — when only an HR number is supplied (no
     URL, no name), distill a company name from a register web search so the
     insolvency/enrichment search has a subject.
@@ -87,8 +87,8 @@ async def _resolve_name(hr_no: Optional[str], register_court: Optional[str]) -> 
 
     Searching by HR number surfaces register directories (northdata, companyhouse, …),
     not the company's own site — but Tavily's `answer` + result titles state the name,
-    which a small LLM call distills. The name is only a *candidate*; the Impressum
-    register-match downstream is the actual truth gate.
+    which a small LLM call distills. The name is only a *candidate* for the
+    insolvency/enrichment search.
     """
     key = os.getenv("TAVILY_API_KEY")
     if not key or not hr_no:
@@ -140,4 +140,3 @@ async def _resolve_name(hr_no: Optional[str], register_court: Optional[str]) -> 
     except Exception as e:  # noqa: BLE001
         print(f"[finder] name resolve failed: {e}")
         return None
-

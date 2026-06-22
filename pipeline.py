@@ -65,6 +65,35 @@ def _person_names(site_report: dict) -> list[str]:
     return [n for n in out if n and isinstance(n, str)]
 
 
+def _impressum_dict(site_report: dict) -> dict:
+    imp = site_report.get("impressum") or {}
+    d = imp.get("data")
+    if isinstance(d, list):
+        d = d[0] if d else None
+    return d if isinstance(d, dict) else {}
+
+
+def _effective_register_input(
+    hr_no: Optional[str],
+    register_court: Optional[str],
+    site_report: dict,
+    *,
+    prefer_impressum: bool = False,
+) -> dict:
+    imp = _impressum_dict(site_report)
+    user_hr = (hr_no or "").strip()
+    user_court = (register_court or "").strip()
+    imp_hr = (imp.get("register_number") or "").strip()
+    imp_court = (imp.get("register_court") or "").strip()
+    if prefer_impressum:
+        eff_hr = imp_hr or user_hr
+        eff_court = imp_court or user_court
+    else:
+        eff_hr = user_hr or imp_hr
+        eff_court = user_court or imp_court
+    return {"hr_no": eff_hr or None, "register_court": eff_court or None}
+
+
 async def run_full_pipeline(
     url: str,
     *,
@@ -84,24 +113,22 @@ async def run_full_pipeline(
     )
 
     # Fact-check supplied Handelsregister data against the crawled Impressum.
+    # A URL-backed request should not fail solely because caller-supplied register
+    # fields differ from the site's Impressum; keep the diagnostic and trust the
+    # Impressum register for downstream enrichment instead.
     identity_match = None
     if (hr_no or "").strip() or (register_court or "").strip():
-        imp = site_report.get("impressum") or {}
-        imp_d = imp.get("data")
-        if isinstance(imp_d, list):
-            imp_d = imp_d[0] if imp_d else None
         from enrichment.company_finder import _verify
-        identity_match = _verify(hr_no, register_court, imp_d if isinstance(imp_d, dict) else None)
-        if identity_match.get("verified") is False:
-            return {
-                "source_url": url,
-                "error": ("Supplied Handelsregister number / register court do not match the "
-                          "website's Impressum (no match) — the site likely belongs to a "
-                          "different company."),
-                "error_kind": "identity_mismatch",
-                "identity_match": identity_match,
-                "register_input": {"hr_no": hr_no, "register_court": register_court},
-            }
+        identity_match = _verify(hr_no, register_court, _impressum_dict(site_report))
+
+    effective_register = _effective_register_input(
+        hr_no,
+        register_court,
+        site_report,
+        prefer_impressum=(identity_match or {}).get("verified") is False,
+    )
+    effective_hr_no = effective_register.get("hr_no")
+    effective_register_court = effective_register.get("register_court")
 
     enrichment: Dict[str, Any] = {
         "wikidata": [],
@@ -123,7 +150,7 @@ async def run_full_pipeline(
         wd_task = asyncio.create_task(wikidata_lookup(company_name))
         tv_task = asyncio.create_task(
             tavily_enrich(company_name, own_domain=url,
-                          hr_no=hr_no, register_court=register_court)
+                          hr_no=effective_hr_no, register_court=effective_register_court)
         )
         sn_task = asyncio.create_task(check_sanctions(company_name, persons))
         wd, tv, sn = await asyncio.gather(wd_task, tv_task, sn_task)
@@ -132,8 +159,8 @@ async def run_full_pipeline(
         enrichment["sanctions"] = sn
 
     full = {**site_report, "enrichment": enrichment, "profile": None}
-    if hr_no or register_court:
-        full["register_input"] = {"hr_no": hr_no, "register_court": register_court}
+    if effective_hr_no or effective_register_court:
+        full["register_input"] = effective_register
     if identity_match is not None:
         full["identity_match"] = identity_match
 

@@ -4,7 +4,8 @@ Bearer-token-gated REST API. Send a company **domain** (or, when there is no
 website, a **Handelsregister number + court**) and receive a structured analysis:
 elevator pitch, products & services, Impressum, insolvency check, sector outlook,
 B2B-Entscheider-Profil. When a domain is sent together with Handelsregister data,
-the Impressum is fact-checked against it (mismatch → 422).
+the Impressum is compared against it and returned as non-fatal `identity_match`
+metadata.
 
 - **Base URL (production):** `https://deepintel.boniforce.de`
 - **Base URL (local dev):** `http://localhost:8000`
@@ -34,7 +35,7 @@ Synchronous analysis. Returns the full structured bundle. Typical latency
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `domain` | string | –¹ | `null` | Bare domain or full URL. `siemens.com`, `https://www.siemens.com/` both accepted. Primary input. Omit it for a Handelsregister-/name-based insolvency check (no website crawl). |
-| `hr_no` | string | –¹ | `null` | Handelsregister number, e.g. `HRA 12345`. With a `domain` → the crawled Impressum is fact-checked against it (mismatch → 422). Without a `domain` → resolves the company for the insolvency search. Also sharpens the insolvency query; echoed in `register_input`. |
+| `hr_no` | string | –¹ | `null` | Handelsregister number, e.g. `HRA 12345`. With a `domain` → the crawled Impressum is compared against it and mismatches are returned as non-fatal metadata. Without a `domain` → resolves the company for the insolvency search. Also sharpens the insolvency query; echoed in `register_input`. |
 | `register_court` | string | – | `null` | Registergericht / register city (the Amtsgericht), e.g. `Stuttgart`. Used together with `hr_no` for the fact-check / resolution and to sharpen the insolvency query. |
 | `company_name` | string | –¹ | `null` | Optional. Overrides the auto-derived name for enrichment; usable as the search subject when no `domain`/`hr_no` is given. |
 | `options.with_profile` | bool | – | `true` | Generate German 4-block B2B-Entscheider-Profil via gpt-4o. |
@@ -64,7 +65,7 @@ curl -X POST https://deepintel.boniforce.de/api/analyze \
 ```
 
 - **match** → full analysis; response carries `identity_match.verified = true` + the site's `site_register`.
-- **contradiction** → **HTTP 422**, `error_kind = "identity_mismatch"`, no company data — the site belongs to a different company.
+- **contradiction** → analysis still proceeds with `identity_match.verified = false`; if the Impressum has register data, that site's register is used for downstream enrichment.
 - **Impressum has no register data** → analysis proceeds with `identity_match.verified = null` (could not confirm).
 
 #### Without a website — insolvency + enrichment
@@ -84,7 +85,7 @@ Runs Tavily insolvency + competitors/news + sanctions. `metrics.name_only = true
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `verified` | bool/null | `true` = confirmed; `false` = contradicted (→ 422); `null` = no register data on site. |
+| `verified` | bool/null | `true` = confirmed; `false` = contradicted but non-fatal; `null` = no register data on site. |
 | `checks` | object | Per-field result `{hr_no, register_court}` — `true`/`false`/`null`. |
 | `site_register` | object | What the site's Impressum states (`register_number`, `register_court`). |
 | `reason` | string | Human-readable verdict. |
@@ -248,7 +249,7 @@ Returned inside the standard `POST /api/analyze` response when `options.with_bra
 
 Returned inside the standard `POST /api/analyze` response (no separate endpoint). Requires `options.with_enrichment = true` (the default); with enrichment disabled the booleans stay `false` and `evidence` is empty.
 
-**Disambiguation:** supply request fields `hr_no` (Handelsregister number) and `register_court` (Amtsgericht). `hr_no` sharpens the **news** query — it pins company identity for co-named firms (the quoted name + the HR number). `register_court` drives the **amtlich** portal lookup; the news query deliberately omits it because the insolvency court differs from the register court (e.g. registered AG Stuttgart, proceeding AG Ludwigsburg), so forcing it would bias against the real filing. Both are recommended when the name is common across cities, and **both are required** for the amtlich tier. Echoed back in `register_input` + the Insolvenz-Check `text` blocks.
+**Disambiguation:** supply request fields `hr_no` (Handelsregister number) and `register_court` (Amtsgericht). If omitted on a website request, the crawler uses the website's own Impressum fields (`register_number`, `register_court`) when available and echoes them in `register_input`. `hr_no` sharpens the **news** query and validates evidence pages; `register_court` drives the **amtlich** portal lookup. Both are recommended when the name is common across cities, and **both are required** for the amtlich tier.
 
 Two independent tiers by **source** (not by proceeding stage): a soft NEWS signal and a hard AMTLICH confirmation.
 
@@ -268,7 +269,7 @@ Typical states:
 - News reports a proceeding but the portal has no entry yet (**still investigate — do NOT treat as clear**): `{"insolvenzverfahren": true, "insolvenz": false, "confirmed": true}`
 
 **How it works:**
-- *News tier* — Tavily searches (`search_depth=advanced`, `time_range=year`) with a keyword-first query using the exact quoted company name (pinned by the `hr_no` number), a proceeding-markers pass (`Insolvenzverwalter` / `Insolvenzantrag` / `eröffnet` / `Aktenzeichen`), and a pass scoped via `include_domains` to German insolvency aggregators (`insolvenzbekanntmachungen`, `verbraucherschutzforum`, `versteigerungskalender`, `insolvenzradar`, `infobroker`, `unternehmensregister`, `northdata`). The aggregator pass is essential from datacenter IPs, where Tavily throttles broad queries and would otherwise drop the proceeding source. Signals are attributed by **whole-word** company-name match within court-record proximity, so firms co-listed on multi-company insolvency pages don't false-positive. Sets `insolvenzverfahren` only.
+- *News tier* — Tavily searches (`search_depth=advanced`, `time_range=year`) with a keyword-first query using the exact quoted company name (pinned by the `hr_no` number), a proceeding-markers pass (`Insolvenzverwalter` / `Insolvenzantrag` / `eröffnet` / `Aktenzeichen`), and a pass scoped via `include_domains` to German insolvency aggregators (`insolvenzbekanntmachungen`, `verbraucherschutzforum`, `versteigerungskalender`, `insolvenzradar`, `infobroker`, `unternehmensregister`). Candidate sources must match the same legal entity: exact normalized legal name by default (`INSOLVENCY_IDENTITY_THRESHOLD=1.0`) or matching HRB/HRA; pages with a different register key or court are rejected. Short token overlap such as `Jordan` alone does not count. Pure company-registry directories (North Data) are excluded as insolvency evidence — they render an `Insolvenzverfahren` section label on every profile regardless of actual status, so a keyword hit there is structural noise, not a real proceeding. Sets `insolvenzverfahren` only.
 - *Amtlich tier* — when `hr_no` + `register_court` are supplied, a headless browser queries the official portal `insolvenzbekanntmachungen.de` by the exact register key (type + number + court — a unique key, no name ambiguity). An official publication sets `insolvenz=true`; the portal **never** clears the news `insolvenzverfahren` (so a fresh proceeding reported in news but not yet published officially still surfaces as "investigate").
 
 **Caveat:** this is a screening signal, not a legal record.
@@ -300,26 +301,20 @@ curl -X POST https://deepintel.boniforce.de/api/analyze \
 
 Clients should check for the `error` field at the top level (without `extracted`) before consuming the rest.
 
-### 422 Unprocessable Entity — Handelsregister mismatch / unresolved
+### 422 Unprocessable Entity — unresolved / invalid input
 
-Domain's Impressum contradicts the supplied `hr_no`/`register_court` (wrong company), or no company could be resolved from register data alone:
+No company could be resolved from register data alone, or the request is missing all accepted identifiers:
 
 ```json
 {
-  "source_url": "https://www.example-gmbh.de/",
-  "error": "Supplied Handelsregister number / register court do not match the website's Impressum (no match) — the site likely belongs to a different company.",
-  "error_kind": "identity_mismatch",
-  "identity_match": {
-    "verified": false,
-    "reason": "register mismatch",
-    "checks": { "hr_no": false, "register_court": false },
-    "site_register": { "register_number": "HRB 6684", "register_court": "Amtsgericht München" }
-  },
+  "source_url": "",
+  "error": "Could not resolve a company from the supplied Handelsregister number / register court. Add a company name or website.",
+  "error_kind": "unresolved",
   "register_input": { "hr_no": "HRB 99999", "register_court": "Hamburg" }
 }
 ```
 
-(`error_kind = "unresolved"` is returned when only register data was given and no company could be resolved from it.)
+Register mismatches on a `domain` request are returned as non-fatal `identity_match` metadata, not as `422`.
 
 ### 400 Bad Request — invalid or missing identifier
 
