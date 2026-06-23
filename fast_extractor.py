@@ -16,7 +16,7 @@ import asyncio
 import json
 import os
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import httpx
 from openai import AsyncOpenAI  # litellm-compatible client; we route to Gemini
@@ -267,6 +267,18 @@ SYSTEM_PROMPT = (
 )
 
 
+def _coerce_obj(parsed: Any) -> Optional[dict]:
+    """LLMs sometimes return a JSON array (or scalar) despite json_object mode.
+    Normalise to a single dict-or-None so downstream dict() never explodes."""
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
 async def llm_extract(page_text: str, source_url: str) -> Optional[dict]:
     """Single Gemini call, schema-constrained."""
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -305,7 +317,7 @@ async def llm_extract(page_text: str, source_url: str) -> Optional[dict]:
     content = re.sub(r"^```(?:json)?\s*", "", content.strip())
     content = re.sub(r"\s*```$", "", content)
     try:
-        return json.loads(content)
+        return _coerce_obj(json.loads(content))
     except json.JSONDecodeError as e:
         print(f"[fast] JSON parse failed: {e}\n{content[:500]}")
         return None
@@ -376,6 +388,8 @@ def _extract_register_from_impressum_text(text: str) -> dict:
 
 
 def _merge_register_fallback(impressum_data: Optional[dict], impressum_text: str) -> Optional[dict]:
+    if not isinstance(impressum_data, dict):
+        impressum_data = None
     detected = _extract_register_from_impressum_text(impressum_text)
     if not detected:
         return impressum_data
@@ -393,7 +407,7 @@ def _effective_register_input(
     *,
     prefer_impressum: bool = False,
 ) -> dict:
-    imp = impressum_data or {}
+    imp = impressum_data if isinstance(impressum_data, dict) else {}
     user_hr = (hr_no or "").strip()
     user_court = (register_court or "").strip()
     imp_hr = (imp.get("register_number") or "").strip()
@@ -435,7 +449,7 @@ async def llm_extract_impressum(impressum_text: str, source_url: str) -> Optiona
     content = re.sub(r"^```(?:json)?\s*", "", content)
     content = re.sub(r"\s*```$", "", content)
     try:
-        return json.loads(content)
+        return _coerce_obj(json.loads(content))
     except json.JSONDecodeError as e:
         print(f"[fast] impressum JSON parse failed: {e}")
         return None
