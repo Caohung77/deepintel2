@@ -636,22 +636,17 @@ async def fast_extract(url: str, *, with_profile: bool = True,
                 home_html = fallback_html
                 text = html_to_text(home_html)
 
-        if len(text) < 200:
-            return {
-                "source_url": url,
-                "final_url": home.final_url,
-                "error": USER_FRIENDLY_MESSAGE,
-                "error_kind": "no_content",
-                "error_detail": f"cleaned text {len(text)} chars",
-                "http_status": home.status,
-                "metrics": {
-                    "fetch_ms": round((time.time() - t0) * 1000),
-                    "home_html_bytes": len(home_html),
-                    "home_text_chars": len(text),
-                },
-            }
+        # A thin homepage is NOT the same as an empty site. Legacy static sites
+        # (old PHP multi-page sites, mid-redesign sites with content in HTML
+        # comments) often ship a splash/menu homepage whose real company data
+        # — address, Geschäftsführer, Handelsregister — lives only on the
+        # Impressum/Kontakt subpages. Don't abort on thin home text alone;
+        # resolve the Impressum below and fail only if that is also empty.
+        thin_home = len(text) < 200
 
-        # Resolve Impressum URL + fetch it in parallel with home-page extract
+        # Resolve Impressum URL + fetch it in parallel with home-page extract.
+        # find_impressum_url scans raw home_html links, so it still works when the
+        # cleaned homepage text is thin.
         imp_url_task = asyncio.create_task(find_impressum_url(url, home_html, cx))
 
         home_llm_task = asyncio.create_task(llm_extract(text, url))
@@ -661,6 +656,23 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         if imp_url:
             imp = await fetch_html(imp_url, client=cx)
             imp_html = imp.html if not imp.error_kind else None
+
+        # Genuinely empty: thin homepage AND no Impressum content recovered.
+        if thin_home and not imp_html:
+            home_llm_task.cancel()
+            return {
+                "source_url": url,
+                "final_url": home.final_url,
+                "error": USER_FRIENDLY_MESSAGE,
+                "error_kind": "no_content",
+                "error_detail": f"cleaned text {len(text)} chars, no impressum",
+                "http_status": home.status,
+                "metrics": {
+                    "fetch_ms": round((time.time() - t0) * 1000),
+                    "home_html_bytes": len(home_html),
+                    "home_text_chars": len(text),
+                },
+            }
 
     fetch_ms = (time.time() - t0) * 1000
 
