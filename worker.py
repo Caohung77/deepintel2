@@ -25,6 +25,27 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlparse
+
+
+def _ensure_scheme(url: str) -> str:
+    """Normalise a URL submitted in a job spec.
+
+    Job submitters (Streamlit form, third-party callers) often pass a bare
+    domain like 'kanzlei-distel.com' or 'dubimoebel.de' with no scheme.
+    httpx requires an absolute URL and rejects bare domains with
+    'UnsupportedProtocol', which surfaces downstream as a 'connect' /
+    unreachable error. Prepend https:// so bare domains resolve.
+
+    Mirrors api/server.py:normalise_url, but does NOT hard-fail on malformed
+    input — the pipeline's own error path handles that.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw.lstrip("/")
+    return raw
 
 try:
     from dotenv import load_dotenv
@@ -102,7 +123,7 @@ async def _process_job(req_path: Path) -> None:
         hr_no = (spec.get("hr_no") or "").strip() or None
         register_court = (spec.get("register_court") or "").strip() or None
         company_name = (spec.get("company_name") or "").strip() or None
-        url = (spec.get("url") or "").strip()
+        url = _ensure_scheme(spec.get("url"))
         # No URL → enrichment-only (fast_extract handles it); full pipeline would crawl.
         if mode == "fast" or not url:
             report = await fast_extract(
