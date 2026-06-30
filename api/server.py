@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from fast_extractor import fast_extract
 
 API_TITLE = "deepintel2 Public API"
-API_VERSION = "0.2.14"
+API_VERSION = "0.2.16"
 API_DESC = (
     "Company-website intelligence API. "
     "Send a domain, receive a structured B2B analysis "
@@ -123,16 +123,26 @@ class AnalyzeRequest(BaseModel):
 # ---- Domain normalisation ------------------------------------------------
 
 _BARE_DOMAIN_RX = re.compile(r"^(?:https?://)?([\w.-]+\.[a-z]{2,})(?:[:/].*)?$", re.I)
+_MARKDOWN_URL_RX = re.compile(r"^\s*\[[^\]]+\]\((https?://[^)\s]+)\)\s*$", re.I)
+
+
+def _unwrap_url_input(value: str) -> str:
+    raw = (value or "").strip().strip("`")
+    md = _MARKDOWN_URL_RX.match(raw)
+    return md.group(1) if md else raw
 
 
 def normalise_url(value: str) -> str:
     """Accept 'siemens.com', 'www.siemens.com', 'https://siemens.com/...' and produce a full URL."""
-    raw = (value or "").strip()
+    raw = _unwrap_url_input(value)
     if not raw:
         raise HTTPException(status_code=400, detail="Empty domain.")
     if not raw.startswith(("http://", "https://")):
         raw = "https://" + raw.lstrip("/")
-    parsed = urlparse(raw)
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Not a valid domain: {value!r}") from None
     if not parsed.netloc or "." not in parsed.netloc:
         raise HTTPException(status_code=400, detail=f"Not a valid domain: {value!r}")
     # Strip credentials if any

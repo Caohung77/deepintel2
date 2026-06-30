@@ -20,12 +20,21 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 import time
 import traceback
 from pathlib import Path
-from urllib.parse import urlparse
+
+
+_MARKDOWN_URL_RX = re.compile(r"^\s*\[[^\]]+\]\((https?://[^)\s]+)\)\s*$", re.I)
+
+
+def _unwrap_url_input(url: str) -> str:
+    raw = (url or "").strip().strip("`")
+    md = _MARKDOWN_URL_RX.match(raw)
+    return md.group(1) if md else raw
 
 
 def _ensure_scheme(url: str) -> str:
@@ -40,7 +49,7 @@ def _ensure_scheme(url: str) -> str:
     Mirrors api/server.py:normalise_url, but does NOT hard-fail on malformed
     input — the pipeline's own error path handles that.
     """
-    raw = (url or "").strip()
+    raw = _unwrap_url_input(url)
     if not raw:
         return ""
     if not raw.startswith(("http://", "https://")):

@@ -91,6 +91,58 @@ class FastRegisterExtractionTests(unittest.TestCase):
         )
         self.assertEqual(result["identity_match"]["verified"], False)
 
+    def test_https_transport_failure_retries_plain_http_redirect(self):
+        home_html = f"<html><body><p>{'Distel company text. ' * 20}</p></body></html>"
+        impressum_html = "<html><body>Dr. Distel GmbH HRB 765167 Amtsgericht Stuttgart</body></html>"
+        fetch_mock = AsyncMock(
+            side_effect=[
+                FetchResult(error_kind="dns", error_detail="TLS alert"),
+                FetchResult(
+                    html=home_html,
+                    status=200,
+                    final_url="https://www.kanzlei-distel.com/",
+                ),
+                FetchResult(
+                    html=impressum_html,
+                    status=200,
+                    final_url="https://www.kanzlei-distel.com/Impressum",
+                ),
+            ]
+        )
+        find_impressum_mock = AsyncMock(
+            return_value="https://www.kanzlei-distel.com/Impressum"
+        )
+
+        with (
+            patch("fast_extractor.fetch_html", new=fetch_mock),
+            patch("fast_extractor.find_impressum_url", new=find_impressum_mock),
+            patch("fast_extractor.llm_extract", new=AsyncMock(return_value={"name": "Dr. Distel GmbH"})),
+            patch(
+                "fast_extractor.llm_extract_impressum",
+                new=AsyncMock(
+                    return_value={
+                        "company_name": "Dr. Distel GmbH",
+                        "register_number": "HRB 765167",
+                        "register_court": "Stuttgart",
+                    }
+                ),
+            ),
+        ):
+            result = asyncio.run(
+                fast_extract(
+                    "https://www.kanzlei-distel.de/",
+                    with_profile=False,
+                    with_enrichment=False,
+                    with_branch=False,
+                )
+            )
+
+        self.assertNotIn("error_kind", result)
+        self.assertEqual(result["source_url"], "https://www.kanzlei-distel.com/")
+        self.assertEqual(fetch_mock.call_args_list[0].args[0], "https://www.kanzlei-distel.de/")
+        self.assertEqual(fetch_mock.call_args_list[1].args[0], "http://www.kanzlei-distel.de/")
+        self.assertEqual(find_impressum_mock.call_args.args[0], "https://www.kanzlei-distel.com/")
+
 
 if __name__ == "__main__":
     unittest.main()

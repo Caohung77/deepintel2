@@ -20,7 +20,7 @@ from typing import Any, List, Optional
 
 import httpx
 from openai import AsyncOpenAI  # litellm-compatible client; we route to Gemini
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 try:
     from dotenv import load_dotenv
@@ -80,6 +80,25 @@ class FetchResult:
         self.error_kind = error_kind          # 'dns', 'connect', 'timeout', 'http_status', 'non_html', 'empty'
         self.error_detail = error_detail
         self.final_url = final_url
+
+
+_HTTPS_CONNECT_FAILURE_KINDS = {"dns", "connect", "timeout"}
+
+
+def _http_fallback_url(url: str, result: FetchResult) -> Optional[str]:
+    """Return an HTTP retry URL for HTTPS transport failures.
+
+    Some legacy domains have broken TLS on their old hostname but still expose
+    a plain-HTTP redirect to the current HTTPS site. Retrying once with HTTP
+    lets us follow that redirect chain instead of reporting the site as dead.
+    """
+    if result.error_kind not in _HTTPS_CONNECT_FAILURE_KINDS:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    return urlunparse(("http", parsed.netloc, parsed.path or "/", parsed.params,
+                       parsed.query, parsed.fragment))
 
 
 async def fetch_html(url: str, *, follow_redirects: bool = True, timeout: float = 20.0,
@@ -606,6 +625,16 @@ async def fast_extract(url: str, *, with_profile: bool = True,
         headers=HEADERS, follow_redirects=True, timeout=20.0,
     ) as cx:
         home = await fetch_html(url, client=cx)
+        http_retry_url = _http_fallback_url(url, home)
+        if http_retry_url:
+            print(f"[fast] https fetch failed ({home.error_kind}); trying HTTP fallback")
+            http_home = await fetch_html(http_retry_url, client=cx)
+            if http_home.html and not http_home.error_kind:
+                home = http_home
+                url = home.final_url or http_retry_url
+        elif home.html and home.final_url:
+            url = home.final_url
+
         home_html = home.html
         used_browser = False
         # WAF/Cloudflare block (e.g. 403 from a datacenter IP) → retry via real browser.
